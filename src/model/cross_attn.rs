@@ -102,7 +102,9 @@ impl<B: Backend> CrossAttention<B> {
 
         // Apply mask if provided
         let scores = if let Some(mask) = key_mask {
-            let mask = mask.unsqueeze::<3>().unsqueeze::<4>();
+            // Expand mask from [batch, seq] to [batch, 1, 1, seq] for broadcasting
+            let mask: Tensor<B, 3, burn::tensor::Bool> = mask.unsqueeze_dim(1);
+            let mask: Tensor<B, 4, burn::tensor::Bool> = mask.unsqueeze_dim(1);
             let scores_dims = scores.dims();
             let neg_inf = Tensor::<B, 4>::full(scores_dims, -1e9, &scores.device());
             scores.mask_where(mask.expand(scores_dims), neg_inf)
