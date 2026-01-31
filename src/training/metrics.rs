@@ -1,9 +1,10 @@
 //! Training metrics and evaluation
 
+use crate::data::dataset::ScoreNormalization;
 use std::fmt;
 
 /// Metrics accumulated during training/evaluation
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Metrics {
     /// Total loss
     pub total_loss: f64,
@@ -15,17 +16,43 @@ pub struct Metrics {
     pub correct_wins: usize,
     /// Total predictions
     pub total_predictions: usize,
-    /// Sum of absolute home score errors
+    /// Sum of absolute home score errors (in normalized space)
     pub home_score_mae_sum: f64,
-    /// Sum of absolute away score errors
+    /// Sum of absolute away score errors (in normalized space)
     pub away_score_mae_sum: f64,
     /// Number of batches accumulated
     pub batch_count: usize,
+    /// Score normalization for converting MAE to original scale
+    pub score_norm: ScoreNormalization,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Metrics {
+            total_loss: 0.0,
+            win_loss: 0.0,
+            score_loss: 0.0,
+            correct_wins: 0,
+            total_predictions: 0,
+            home_score_mae_sum: 0.0,
+            away_score_mae_sum: 0.0,
+            batch_count: 0,
+            score_norm: ScoreNormalization::default(),
+        }
+    }
 }
 
 impl Metrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create with specific normalization params
+    pub fn with_normalization(score_norm: ScoreNormalization) -> Self {
+        Metrics {
+            score_norm,
+            ..Self::default()
+        }
     }
 
     /// Update metrics with a batch result
@@ -85,25 +112,26 @@ impl Metrics {
         }
     }
 
-    /// Get home score MAE
+    /// Get home score MAE (scaled back to original score range)
     pub fn home_score_mae(&self) -> f64 {
         if self.total_predictions == 0 {
             0.0
         } else {
-            self.home_score_mae_sum / self.total_predictions as f64
+            // MAE in normalized space * std = MAE in original space
+            (self.home_score_mae_sum / self.total_predictions as f64) * self.score_norm.std as f64
         }
     }
 
-    /// Get away score MAE
+    /// Get away score MAE (scaled back to original score range)
     pub fn away_score_mae(&self) -> f64 {
         if self.total_predictions == 0 {
             0.0
         } else {
-            self.away_score_mae_sum / self.total_predictions as f64
+            (self.away_score_mae_sum / self.total_predictions as f64) * self.score_norm.std as f64
         }
     }
 
-    /// Get combined score MAE
+    /// Get combined score MAE (in original score range)
     pub fn score_mae(&self) -> f64 {
         (self.home_score_mae() + self.away_score_mae()) / 2.0
     }

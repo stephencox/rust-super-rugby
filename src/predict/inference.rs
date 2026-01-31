@@ -3,6 +3,7 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
 
+use crate::data::dataset::ScoreNormalization;
 use crate::data::Database;
 use crate::features::MatchFeatures;
 use crate::model::rugby_net::{MatchPrediction, RugbyNet, RugbyNetConfig};
@@ -15,6 +16,8 @@ pub struct Predictor<B: Backend> {
     device: B::Device,
     max_history: usize,
     min_history: usize,
+    /// Score normalization for denormalizing predictions
+    score_norm: ScoreNormalization,
 }
 
 impl<B: Backend> Predictor<B>
@@ -24,6 +27,10 @@ where
 {
     /// Create a new predictor
     pub fn new(model: RugbyNet<B>, db: Database, device: B::Device) -> Self {
+        // Compute normalization from all historical matches
+        let all_matches = db.get_all_matches().unwrap_or_default();
+        let score_norm = ScoreNormalization::from_matches(&all_matches);
+
         let max_history = model.max_seq_len();
         Predictor {
             model,
@@ -31,6 +38,25 @@ where
             device,
             max_history,
             min_history: 3,
+            score_norm,
+        }
+    }
+
+    /// Create predictor with explicit normalization params
+    pub fn with_normalization(
+        model: RugbyNet<B>,
+        db: Database,
+        device: B::Device,
+        score_norm: ScoreNormalization,
+    ) -> Self {
+        let max_history = model.max_seq_len();
+        Predictor {
+            model,
+            db,
+            device,
+            max_history,
+            min_history: 3,
+            score_norm,
         }
     }
 
@@ -108,8 +134,9 @@ where
             home_team: home.id,
             away_team: away.id,
             home_win_prob: pred.home_win_prob,
-            predicted_home_score: pred.home_score,
-            predicted_away_score: pred.away_score,
+            // Denormalize scores: pred * std + mean
+            predicted_home_score: self.score_norm.denormalize(pred.home_score),
+            predicted_away_score: self.score_norm.denormalize(pred.away_score),
             confidence,
         })
     }

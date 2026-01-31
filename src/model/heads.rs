@@ -90,14 +90,14 @@ impl<B: Backend> ScoreHead<B> {
     /// * `x` - Fused representation [batch, input_dim]
     ///
     /// # Returns
-    /// Predicted score [batch, 1] (non-negative)
+    /// Predicted score [batch, 1] (z-score normalized)
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let x = gelu(self.fc1.forward(x));
         let x = self.dropout.forward(x);
         let x = gelu(self.fc2.forward(x));
         let x = self.dropout.forward(x);
-        // Use softplus for non-negative output
-        self.fc3.forward(x).exp().log1p()
+        // Linear output for z-score normalized predictions
+        self.fc3.forward(x)
     }
 }
 

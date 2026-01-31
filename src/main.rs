@@ -330,13 +330,23 @@ mod commands {
         let train_dataset =
             RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
         println!("  {} training samples", train_dataset.len());
+        println!(
+            "  Score normalization: mean={:.1}, std={:.1}",
+            train_dataset.score_norm.mean, train_dataset.score_norm.std
+        );
 
         println!(
             "Creating validation dataset ({} to {})...",
             train_cutoff, val_end
         );
-        let val_dataset =
-            RugbyDataset::from_matches_in_range(&db, train_cutoff, val_end, dataset_config)?;
+        // Use same normalization as training set
+        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            train_cutoff,
+            val_end,
+            dataset_config,
+            train_dataset.score_norm,
+        )?;
         println!("  {} validation samples", val_dataset.len());
 
         if train_dataset.is_empty() || val_dataset.is_empty() {

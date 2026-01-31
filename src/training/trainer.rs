@@ -106,6 +106,9 @@ where
     ) -> Result<(RugbyNet<B>, TrainingHistory)> {
         use burn::data::dataloader::DataLoaderBuilder;
 
+        // Store score normalization for metrics
+        let score_norm = train_dataset.score_norm;
+
         let batcher_train = MatchBatcher::<B>::new(self.device.clone());
         let batcher_val = MatchBatcher::<B>::new(self.device.clone());
 
@@ -128,10 +131,10 @@ where
 
         for epoch in 0..self.config.training.epochs {
             // Training phase
-            let train_metrics = self.train_epoch(train_loader.iter());
+            let train_metrics = self.train_epoch(train_loader.iter(), score_norm);
 
             // Validation phase (using training model, simpler)
-            let val_metrics = self.validate_epoch(val_loader.iter());
+            let val_metrics = self.validate_epoch(val_loader.iter(), score_norm);
 
             // Record history
             history.record_epoch(epoch, &train_metrics, &val_metrics);
@@ -166,8 +169,12 @@ where
     }
 
     /// Train one epoch
-    fn train_epoch(&mut self, loader: impl Iterator<Item = MatchBatch<B>>) -> Metrics {
-        let mut metrics = Metrics::new();
+    fn train_epoch(
+        &mut self,
+        loader: impl Iterator<Item = MatchBatch<B>>,
+        score_norm: crate::data::dataset::ScoreNormalization,
+    ) -> Metrics {
+        let mut metrics = Metrics::with_normalization(score_norm);
 
         for batch in loader {
             let batch_size = batch.home_history.dims()[0];
@@ -217,8 +224,12 @@ where
     }
 
     /// Validate one epoch (no gradient updates)
-    fn validate_epoch(&self, loader: impl Iterator<Item = MatchBatch<B>>) -> Metrics {
-        let mut metrics = Metrics::new();
+    fn validate_epoch(
+        &self,
+        loader: impl Iterator<Item = MatchBatch<B>>,
+        score_norm: crate::data::dataset::ScoreNormalization,
+    ) -> Metrics {
+        let mut metrics = Metrics::with_normalization(score_norm);
 
         for batch in loader {
             let batch_size = batch.home_history.dims()[0];

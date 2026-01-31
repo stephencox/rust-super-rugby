@@ -8,6 +8,54 @@ use crate::{MatchRecord, Result, TeamId};
 use burn::data::dataset::Dataset;
 use chrono::NaiveDate;
 
+/// Score normalization parameters (computed from training data)
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreNormalization {
+    pub mean: f32,
+    pub std: f32,
+}
+
+impl Default for ScoreNormalization {
+    fn default() -> Self {
+        // Default values based on typical Super Rugby scores
+        ScoreNormalization {
+            mean: 25.0,
+            std: 12.0,
+        }
+    }
+}
+
+impl ScoreNormalization {
+    /// Compute normalization params from a set of matches
+    pub fn from_matches(matches: &[MatchRecord]) -> Self {
+        if matches.is_empty() {
+            return Self::default();
+        }
+
+        let scores: Vec<f32> = matches
+            .iter()
+            .flat_map(|m| [m.home_score as f32, m.away_score as f32])
+            .collect();
+
+        let n = scores.len() as f32;
+        let mean = scores.iter().sum::<f32>() / n;
+        let variance = scores.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
+        let std = variance.sqrt().max(1.0); // Avoid division by zero
+
+        ScoreNormalization { mean, std }
+    }
+
+    /// Normalize a score
+    pub fn normalize(&self, score: f32) -> f32 {
+        (score - self.mean) / self.std
+    }
+
+    /// Denormalize a score
+    pub fn denormalize(&self, normalized: f32) -> f32 {
+        normalized * self.std + self.mean
+    }
+}
+
 /// A training sample for the model
 #[derive(Debug, Clone)]
 pub struct MatchSample {
@@ -48,6 +96,8 @@ impl Default for DatasetConfig {
 pub struct RugbyDataset {
     samples: Vec<MatchSample>,
     config: DatasetConfig,
+    /// Score normalization parameters
+    pub score_norm: ScoreNormalization,
 }
 
 impl RugbyDataset {
@@ -72,12 +122,37 @@ impl RugbyDataset {
         Self::from_matches(db, matches, config)
     }
 
+    /// Create dataset from matches in a date range with explicit normalization
+    pub fn from_matches_in_range_with_norm(
+        db: &Database,
+        start: NaiveDate,
+        end: NaiveDate,
+        config: DatasetConfig,
+        score_norm: ScoreNormalization,
+    ) -> Result<Self> {
+        let matches = db.get_matches_in_range(start, end)?;
+        Self::from_matches_with_norm(db, matches, config, Some(score_norm))
+    }
+
     /// Create dataset from a list of matches
     pub fn from_matches(
         db: &Database,
         matches: Vec<MatchRecord>,
         config: DatasetConfig,
     ) -> Result<Self> {
+        Self::from_matches_with_norm(db, matches, config, None)
+    }
+
+    /// Create dataset with explicit normalization params (for validation/test using train stats)
+    pub fn from_matches_with_norm(
+        db: &Database,
+        matches: Vec<MatchRecord>,
+        config: DatasetConfig,
+        score_norm: Option<ScoreNormalization>,
+    ) -> Result<Self> {
+        // Compute normalization from this dataset if not provided
+        let score_norm = score_norm.unwrap_or_else(|| ScoreNormalization::from_matches(&matches));
+
         let mut samples = Vec::new();
 
         // Build history index: for each match, we need historical matches before it
@@ -126,13 +201,23 @@ impl RugbyDataset {
                 } else {
                     0.0
                 },
-                home_score: target_match.home_score as f32,
-                away_score: target_match.away_score as f32,
+                // Z-score normalize scores for training
+                home_score: score_norm.normalize(target_match.home_score as f32),
+                away_score: score_norm.normalize(target_match.away_score as f32),
             });
         }
 
-        log::info!("Created dataset with {} samples", samples.len());
-        Ok(RugbyDataset { samples, config })
+        log::info!(
+            "Created dataset with {} samples (score norm: mean={:.1}, std={:.1})",
+            samples.len(),
+            score_norm.mean,
+            score_norm.std
+        );
+        Ok(RugbyDataset {
+            samples,
+            config,
+            score_norm,
+        })
     }
 
     /// Get historical matches for a team before a given date
@@ -205,10 +290,12 @@ impl RugbyDataset {
             RugbyDataset {
                 samples: train_samples.to_vec(),
                 config: self.config.clone(),
+                score_norm: self.score_norm,
             },
             RugbyDataset {
                 samples: val_samples.to_vec(),
                 config: self.config,
+                score_norm: self.score_norm,
             },
         )
     }
