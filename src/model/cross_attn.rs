@@ -265,9 +265,13 @@ impl<B: Backend> CrossAttentionModule<B> {
             away_seq = a;
         }
 
-        // Extract CLS tokens (first position)
-        let home_cls: Tensor<B, 2> = home_seq.slice([0..batch, 0..1, 0..d_model]).squeeze();
-        let away_cls: Tensor<B, 2> = away_seq.slice([0..batch, 0..1, 0..d_model]).squeeze();
+        // Extract CLS tokens (first position) - use reshape to preserve batch dimension
+        let home_cls = home_seq
+            .slice([0..batch, 0..1, 0..d_model])
+            .reshape([batch, d_model]);
+        let away_cls = away_seq
+            .slice([0..batch, 0..1, 0..d_model])
+            .reshape([batch, d_model]);
 
         // Concatenate and fuse
         let combined = Tensor::cat(vec![home_cls, away_cls], 1);

@@ -388,8 +388,9 @@ mod commands {
 
         type MyBackend = Wgpu<f32, i32>;
 
-        // Check for model
-        if !std::path::Path::new(&config.data.model_path).exists() {
+        // Check for model (Burn adds .mpk extension)
+        let model_file = format!("{}.mpk", config.data.model_path);
+        if !std::path::Path::new(&model_file).exists() {
             return Err(rugby::RugbyError::NoModel);
         }
 
@@ -446,13 +447,14 @@ mod commands {
     }
 
     pub fn model_info(config: &Config) -> Result<()> {
-        if !std::path::Path::new(&config.data.model_path).exists() {
+        let model_file = format!("{}.mpk", config.data.model_path);
+        if !std::path::Path::new(&model_file).exists() {
             return Err(rugby::RugbyError::NoModel);
         }
 
         println!("Model Information");
         println!("───────────────────────────────");
-        println!("  Path:           {}", config.data.model_path);
+        println!("  Path:           {}", model_file);
         println!("  d_model:        {}", config.model.d_model);
         println!("  Encoder layers: {}", config.model.n_encoder_layers);
         println!("  Cross-attn:     {}", config.model.n_cross_attn_layers);
@@ -463,12 +465,13 @@ mod commands {
     }
 
     pub fn model_export(config: &Config, output: &str) -> Result<()> {
-        if !std::path::Path::new(&config.data.model_path).exists() {
+        let model_file = format!("{}.mpk", config.data.model_path);
+        if !std::path::Path::new(&model_file).exists() {
             return Err(rugby::RugbyError::NoModel);
         }
 
         // Copy model file
-        std::fs::copy(&config.data.model_path, output)?;
+        std::fs::copy(&model_file, output)?;
         println!("Model exported to {}", output);
 
         Ok(())

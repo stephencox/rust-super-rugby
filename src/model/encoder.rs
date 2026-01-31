@@ -257,8 +257,9 @@ impl<B: Backend> TeamEncoder<B> {
 
         // Normalize and extract CLS token representation
         let x = self.norm.forward(x);
-        let cls: Tensor<B, 2> = x.slice([0..batch, 0..1, 0..self.d_model]).squeeze();
-        cls
+        // Use reshape instead of squeeze to preserve batch dimension even when batch=1
+        x.slice([0..batch, 0..1, 0..self.d_model])
+            .reshape([batch, self.d_model])
     }
 
     /// Get the full sequence output (for cross-attention)
