@@ -3,7 +3,7 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
 
-use crate::data::dataset::ScoreNormalization;
+use crate::data::dataset::{MatchComparison, ScoreNormalization, TeamSummary};
 use crate::data::Database;
 use crate::features::MatchFeatures;
 use crate::model::rugby_net::{MatchPrediction, RugbyNet, RugbyNetConfig};
@@ -112,11 +112,31 @@ where
         let (home_features, home_mask) = self.to_features(&home_matches, home.id);
         let (away_features, away_mask) = self.to_features(&away_matches, away.id);
 
+        // Compute team summaries and comparison features
+        let home_summary = self.compute_team_summary(&home_matches, home.id);
+        let away_summary = self.compute_team_summary(&away_matches, away.id);
+        let is_local = home.country == away.country;
+        let comparison = MatchComparison::from_summaries(&home_summary, &away_summary, is_local);
+
         // Create tensors
         let home_tensor = self.features_to_tensor(&home_features);
         let away_tensor = self.features_to_tensor(&away_features);
         let home_mask_tensor = self.mask_to_tensor(&home_mask);
         let away_mask_tensor = self.mask_to_tensor(&away_mask);
+        let comparison_tensor = Tensor::<B, 1>::from_floats(
+            comparison.to_vec().as_slice(),
+            &self.device,
+        ).reshape([1, MatchComparison::DIM]);
+
+        // Create team ID tensors
+        let home_team_id_tensor = Tensor::<B, 1, burn::tensor::Int>::from_ints(
+            [home.id.0 as i32],
+            &self.device,
+        );
+        let away_team_id_tensor = Tensor::<B, 1, burn::tensor::Int>::from_ints(
+            [away.id.0 as i32],
+            &self.device,
+        );
 
         // Run inference
         let predictions = self.model.forward(
@@ -124,6 +144,9 @@ where
             away_tensor,
             Some(home_mask_tensor),
             Some(away_mask_tensor),
+            Some(home_team_id_tensor),
+            Some(away_team_id_tensor),
+            Some(comparison_tensor),
         );
 
         // Convert to output format
@@ -203,6 +226,66 @@ where
             ConfidenceLevel::Medium
         } else {
             ConfidenceLevel::Low
+        }
+    }
+
+    /// Compute team summary statistics from match history
+    fn compute_team_summary(&self, history: &[MatchRecord], team: TeamId) -> TeamSummary {
+        // Use last 10 games for summary (matching best-performing window from analysis)
+        let window = 10;
+        let recent: Vec<_> = history.iter().rev().take(window).collect();
+
+        if recent.len() < 3 {
+            return TeamSummary::default();
+        }
+
+        let mut wins = 0.0f32;
+        let mut total_pf = 0.0f32;
+        let mut total_pa = 0.0f32;
+        let mut margins = Vec::new();
+
+        for m in &recent {
+            let is_home = m.home_team == team;
+            let (pf, pa) = if is_home {
+                (m.home_score as f32, m.away_score as f32)
+            } else {
+                (m.away_score as f32, m.home_score as f32)
+            };
+
+            let margin = pf - pa;
+            margins.push(margin);
+            total_pf += pf;
+            total_pa += pa;
+
+            if margin > 0.0 {
+                wins += 1.0;
+            } else if margin == 0.0 {
+                wins += 0.5;
+            }
+        }
+
+        let n = recent.len() as f32;
+        let win_rate = wins / n;
+        let margin_avg = margins.iter().sum::<f32>() / n;
+        let pf_avg = total_pf / n;
+        let pa_avg = total_pa / n;
+
+        // Pythagorean expectation
+        let exp = 2.37f32;
+        let pf_pow = total_pf.powf(exp);
+        let pa_pow = total_pa.powf(exp);
+        let pythagorean = if pf_pow + pa_pow > 0.0 {
+            pf_pow / (pf_pow + pa_pow)
+        } else {
+            0.5
+        };
+
+        TeamSummary {
+            win_rate,
+            margin_avg,
+            pythagorean,
+            pf_avg,
+            pa_avg,
         }
     }
 

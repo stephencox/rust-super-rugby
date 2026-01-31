@@ -90,6 +90,8 @@ pub struct Team {
     pub name: String,
     pub country: Country,
     pub aliases: Vec<String>,
+    /// UTC timezone offset in hours (e.g., NZ = 12, SA = 2, AR = -3)
+    pub timezone_offset: i32,
 }
 
 impl Team {

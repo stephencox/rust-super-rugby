@@ -39,7 +39,8 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 country TEXT NOT NULL,
-                aliases TEXT DEFAULT '[]'
+                aliases TEXT DEFAULT '[]',
+                timezone_offset INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS matches (
@@ -86,10 +87,22 @@ impl Database {
             return Ok(team);
         }
 
+        // Default timezone based on country
+        let timezone_offset = match country {
+            Country::NewZealand => 12,
+            Country::Fiji => 12,
+            Country::Australia => 10, // Default to eastern, Force is 8
+            Country::Japan => 9,
+            Country::SouthAfrica => 2,
+            Country::Argentina => -3,
+            Country::Samoa => 13,
+            Country::Tonga => 13,
+        };
+
         // Create new team
         self.conn.execute(
-            "INSERT INTO teams (name, country, aliases) VALUES (?1, ?2, '[]')",
-            params![name, country.code()],
+            "INSERT INTO teams (name, country, aliases, timezone_offset) VALUES (?1, ?2, '[]', ?3)",
+            params![name, country.code(), timezone_offset],
         )?;
 
         let id = TeamId(self.conn.last_insert_rowid());
@@ -98,6 +111,7 @@ impl Database {
             name: name.to_string(),
             country,
             aliases: vec![],
+            timezone_offset,
         })
     }
 
@@ -109,13 +123,14 @@ impl Database {
         let team: Option<Team> = self
             .conn
             .query_row(
-                "SELECT id, name, country, aliases FROM teams WHERE LOWER(name) = ?1",
+                "SELECT id, name, country, aliases, COALESCE(timezone_offset, 0) FROM teams WHERE LOWER(name) = ?1",
                 params![&name_lower],
                 |row| {
                     let id = TeamId(row.get(0)?);
                     let name: String = row.get(1)?;
                     let country_code: String = row.get(2)?;
                     let aliases_json: String = row.get(3)?;
+                    let timezone_offset: i32 = row.get(4)?;
                     let country = Country::from_code(&country_code).unwrap_or(Country::NewZealand);
                     let aliases: Vec<String> =
                         serde_json::from_str(&aliases_json).unwrap_or_default();
@@ -124,6 +139,7 @@ impl Database {
                         name,
                         country,
                         aliases,
+                        timezone_offset,
                     })
                 },
             )
@@ -148,13 +164,14 @@ impl Database {
     pub fn get_team(&self, id: TeamId) -> Result<Team> {
         self.conn
             .query_row(
-                "SELECT id, name, country, aliases FROM teams WHERE id = ?1",
+                "SELECT id, name, country, aliases, COALESCE(timezone_offset, 0) FROM teams WHERE id = ?1",
                 params![id.0],
                 |row| {
                     let id = TeamId(row.get(0)?);
                     let name: String = row.get(1)?;
                     let country_code: String = row.get(2)?;
                     let aliases_json: String = row.get(3)?;
+                    let timezone_offset: i32 = row.get(4)?;
                     let country = Country::from_code(&country_code).unwrap_or(Country::NewZealand);
                     let aliases: Vec<String> =
                         serde_json::from_str(&aliases_json).unwrap_or_default();
@@ -163,6 +180,7 @@ impl Database {
                         name,
                         country,
                         aliases,
+                        timezone_offset,
                     })
                 },
             )
@@ -173,7 +191,7 @@ impl Database {
     pub fn get_all_teams(&self) -> Result<Vec<Team>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, country, aliases FROM teams ORDER BY name")?;
+            .prepare("SELECT id, name, country, aliases, COALESCE(timezone_offset, 0) FROM teams ORDER BY name")?;
 
         let teams = stmt
             .query_map([], |row| {
@@ -181,6 +199,7 @@ impl Database {
                 let name: String = row.get(1)?;
                 let country_code: String = row.get(2)?;
                 let aliases_json: String = row.get(3)?;
+                let timezone_offset: i32 = row.get(4)?;
                 let country = Country::from_code(&country_code).unwrap_or(Country::NewZealand);
                 let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
                 Ok(Team {
@@ -188,6 +207,7 @@ impl Database {
                     name,
                     country,
                     aliases,
+                    timezone_offset,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

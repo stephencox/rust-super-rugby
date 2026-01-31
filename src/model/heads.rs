@@ -1,6 +1,8 @@
 //! Prediction heads for win probability and scores
 //!
 //! Multi-task output heads sharing the encoder representation.
+//! Uses dual-path architecture for win prediction to prevent
+//! comparison features from being drowned out.
 
 use burn::module::Module;
 use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig};
@@ -11,12 +13,14 @@ use burn::tensor::Tensor;
 /// Configuration for prediction heads
 #[derive(Debug, Clone)]
 pub struct HeadsConfig {
-    /// Input dimension from encoder
+    /// Input dimension from encoder (transformer + team embeds + comparison)
     pub input_dim: usize,
     /// Hidden dimension for head MLPs
     pub hidden_dim: usize,
     /// Dropout rate
     pub dropout: f64,
+    /// Dimension of comparison features (for direct path)
+    pub comparison_dim: usize,
 }
 
 impl Default for HeadsConfig {
@@ -25,38 +29,51 @@ impl Default for HeadsConfig {
             input_dim: 128,
             hidden_dim: 64,
             dropout: 0.1,
+            comparison_dim: 5,
         }
     }
 }
 
-/// Win probability prediction head
+/// Win probability prediction head using ONLY comparison features
+///
+/// The comparison features (win_rate_diff, margin_diff, pythagorean_diff, log5, is_local)
+/// have proven predictive power (69.4% accuracy with simple logistic regression).
+///
+/// This head is intentionally simple - a single linear layer - to avoid optimization
+/// issues that prevent learning from these features.
 #[derive(Module, Debug)]
 pub struct WinHead<B: Backend> {
-    fc1: Linear<B>,
-    fc2: Linear<B>,
-    dropout: Dropout,
+    // Single linear layer: comparison features -> logit
+    fc: Linear<B>,
+    /// Dimension of comparison features
+    comparison_dim: usize,
 }
 
 impl<B: Backend> WinHead<B> {
     pub fn new(device: &B::Device, config: &HeadsConfig) -> Self {
         WinHead {
-            fc1: LinearConfig::new(config.input_dim, config.hidden_dim).init(device),
-            fc2: LinearConfig::new(config.hidden_dim, 1).init(device),
-            dropout: DropoutConfig::new(config.dropout).init(),
+            // Simple linear layer - matches what works in Python
+            fc: LinearConfig::new(config.comparison_dim, 1).init(device),
+            comparison_dim: config.comparison_dim,
         }
     }
 
     /// Forward pass returning win logit
     ///
     /// # Arguments
-    /// * `x` - Fused representation [batch, input_dim]
+    /// * `x` - Full representation [batch, input_dim] where last comparison_dim features are comparison
     ///
     /// # Returns
     /// Win logit [batch, 1] (apply sigmoid for probability)
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        let x = gelu(self.fc1.forward(x));
-        let x = self.dropout.forward(x);
-        self.fc2.forward(x)
+        let [batch, input_dim] = x.dims();
+
+        // Extract comparison features (last comparison_dim features)
+        let start = input_dim - self.comparison_dim;
+        let comparison = x.slice([0..batch, start..input_dim]);
+
+        // Simple linear transform
+        self.fc.forward(comparison)
     }
 
     /// Forward pass returning win probability
@@ -164,6 +181,7 @@ mod tests {
             input_dim: 64,
             hidden_dim: 32,
             dropout: 0.0,
+            comparison_dim: 5,
         };
 
         let heads = PredictionHeads::<TestBackend>::new(&device, config);
@@ -183,7 +201,12 @@ mod tests {
     #[test]
     fn test_win_probability() {
         let device = Default::default();
-        let config = HeadsConfig::default();
+        let config = HeadsConfig {
+            input_dim: 128,
+            hidden_dim: 64,
+            dropout: 0.1,
+            comparison_dim: 5,
+        };
 
         let heads = PredictionHeads::<TestBackend>::new(&device, config);
 

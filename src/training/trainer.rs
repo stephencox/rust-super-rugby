@@ -185,6 +185,9 @@ where
                 batch.away_history.clone(),
                 Some(batch.home_mask.clone()),
                 Some(batch.away_mask.clone()),
+                Some(batch.home_team_id.clone()),
+                Some(batch.away_team_id.clone()),
+                Some(batch.comparison.clone()),
             );
 
             // Compute loss
@@ -240,6 +243,9 @@ where
                 batch.away_history.clone(),
                 Some(batch.home_mask.clone()),
                 Some(batch.away_mask.clone()),
+                Some(batch.home_team_id.clone()),
+                Some(batch.away_team_id.clone()),
+                Some(batch.comparison.clone()),
             );
 
             // Compute loss

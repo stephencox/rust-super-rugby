@@ -28,7 +28,7 @@ enum Commands {
         #[command(subcommand)]
         action: DataCommands,
     },
-    /// Train the prediction model
+    /// Train the prediction model (transformer architecture)
     Train {
         /// Override number of epochs
         #[arg(long)]
@@ -36,6 +36,48 @@ enum Commands {
         /// Continue from checkpoint
         #[arg(long)]
         resume: bool,
+    },
+    /// Train the MLP baseline model (comparison features only)
+    TrainMlp {
+        /// Override number of epochs
+        #[arg(long)]
+        epochs: Option<usize>,
+        /// Learning rate (0.1 matches Python baseline)
+        #[arg(long, default_value = "0.1")]
+        lr: f64,
+    },
+    /// Train LSTM model (uses team history sequences)
+    TrainLstm {
+        /// Override number of epochs
+        #[arg(long)]
+        epochs: Option<usize>,
+        /// Learning rate
+        #[arg(long, default_value = "0.01")]
+        lr: f64,
+        /// Hidden size for LSTM
+        #[arg(long, default_value = "64")]
+        hidden_size: usize,
+    },
+    /// Train Transformer model (RugbyNet with cross-attention)
+    TrainTransformer {
+        /// Override number of epochs
+        #[arg(long)]
+        epochs: Option<usize>,
+        /// Learning rate
+        #[arg(long, default_value = "0.0001")]
+        lr: f64,
+        /// Model dimension
+        #[arg(long, default_value = "64")]
+        d_model: usize,
+        /// Batch size (0 for auto)
+        #[arg(long, default_value = "32")]
+        batch_size: usize,
+    },
+    /// Tune MLP hyperparameters with time-based train/val/test splits
+    TuneMlp {
+        /// Maximum epochs to try
+        #[arg(long, default_value = "500")]
+        max_epochs: usize,
     },
     /// Predict match outcomes
     Predict {
@@ -152,6 +194,17 @@ fn main() {
             DataCommands::Status => commands::data_status(&config),
         },
         Commands::Train { epochs, resume } => commands::train(&config, epochs, resume),
+        Commands::TrainMlp { epochs, lr } => commands::train_mlp(&config, epochs, lr),
+        Commands::TrainLstm { epochs, lr, hidden_size } => {
+            commands::train_lstm(&config, epochs, lr, hidden_size)
+        }
+        Commands::TrainTransformer {
+            epochs,
+            lr,
+            d_model,
+            batch_size,
+        } => commands::train_transformer(&config, epochs, lr, d_model, batch_size),
+        Commands::TuneMlp { max_epochs } => commands::tune_mlp(&config, max_epochs),
         Commands::Predict {
             home,
             away,
@@ -346,6 +399,7 @@ mod commands {
             val_end,
             dataset_config,
             train_dataset.score_norm,
+            *train_dataset.feature_norm(),
         )?;
         println!("  {} validation samples", val_dataset.len());
 
@@ -490,6 +544,417 @@ mod commands {
     pub fn model_validate(_config: &Config) -> Result<()> {
         println!("Validation not yet implemented");
         println!("Run 'rugby train' to see validation metrics");
+        Ok(())
+    }
+
+    pub fn train_mlp(config: &Config, epochs: Option<usize>, lr: f64) -> Result<()> {
+        use burn::backend::{Autodiff, NdArray};
+        use chrono::NaiveDate;
+        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
+        use rugby::training::SimpleMLPTrainer;
+
+        // Use NdArray backend (same as debug_training.rs)
+        type MyBackend = NdArray<f32>;
+        type MyAutodiffBackend = Autodiff<MyBackend>;
+
+        let epochs = epochs.unwrap_or(100);
+
+        println!("Initializing Simple MLP training...");
+
+        // Open database
+        let db = Database::open(&config.data.database_path)?;
+        let stats = db.get_stats()?;
+
+        if stats.match_count == 0 {
+            return Err(rugby::RugbyError::Config(
+                "No matches in database. Run 'rugby data sync' first.".to_string(),
+            ));
+        }
+
+        println!("Loaded {} matches from database", stats.match_count);
+
+        // Create datasets with time-based split
+        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+        let dataset_config = DatasetConfig {
+            max_history: config.model.max_history,
+            min_history: 3,
+        };
+
+        println!("Creating training dataset (before {})...", train_cutoff);
+        let train_dataset =
+            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
+        println!("  {} training samples", train_dataset.len());
+
+        println!(
+            "Creating validation dataset ({} to {})...",
+            train_cutoff, val_end
+        );
+        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            train_cutoff,
+            val_end,
+            dataset_config,
+            train_dataset.score_norm,
+            *train_dataset.feature_norm(),
+        )?;
+        println!("  {} validation samples", val_dataset.len());
+
+        if train_dataset.is_empty() || val_dataset.is_empty() {
+            return Err(rugby::RugbyError::Config(
+                "Not enough data for training. Need matches before and after 2023.".to_string(),
+            ));
+        }
+
+        // Create simple trainer (single Linear layer, like debug_training.rs)
+        let device = Default::default();
+        let trainer = SimpleMLPTrainer::<MyAutodiffBackend>::new(device, lr);
+
+        println!("Learning rate: {}", lr);
+        println!("\nStarting Simple MLP training...\n");
+
+        let _history = trainer.train(train_dataset, val_dataset, epochs)?;
+
+        println!("\nSimple MLP Training complete!");
+
+        Ok(())
+    }
+
+    pub fn train_lstm(
+        config: &Config,
+        epochs: Option<usize>,
+        lr: f64,
+        hidden_size: usize,
+    ) -> Result<()> {
+        use burn::backend::{Autodiff, NdArray};
+        use chrono::NaiveDate;
+        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
+        use rugby::model::lstm::LSTMConfig;
+        use rugby::training::LSTMTrainer;
+
+        type MyBackend = NdArray<f32>;
+        type MyAutodiffBackend = Autodiff<MyBackend>;
+
+        let epochs = epochs.unwrap_or(100);
+
+        println!("Initializing LSTM training...");
+
+        // Open database
+        let db = Database::open(&config.data.database_path)?;
+        let stats = db.get_stats()?;
+
+        if stats.match_count == 0 {
+            return Err(rugby::RugbyError::Config(
+                "No matches in database. Run 'rugby data sync' first.".to_string(),
+            ));
+        }
+
+        println!("Loaded {} matches from database", stats.match_count);
+
+        // Create datasets
+        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+        let dataset_config = DatasetConfig {
+            max_history: config.model.max_history,
+            min_history: 3,
+        };
+
+        println!("Creating training dataset (before {})...", train_cutoff);
+        let train_dataset =
+            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
+        println!("  {} training samples", train_dataset.len());
+
+        println!(
+            "Creating validation dataset ({} to {})...",
+            train_cutoff, val_end
+        );
+        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            train_cutoff,
+            val_end,
+            dataset_config,
+            train_dataset.score_norm,
+            *train_dataset.feature_norm(),
+        )?;
+        println!("  {} validation samples", val_dataset.len());
+
+        if train_dataset.is_empty() || val_dataset.is_empty() {
+            return Err(rugby::RugbyError::Config(
+                "Not enough data for training. Need matches before and after 2023.".to_string(),
+            ));
+        }
+
+        // Create LSTM config
+        let lstm_config = LSTMConfig {
+            input_dim: 15, // MatchFeatures::DIM
+            hidden_size,
+            num_layers: 1,
+            bidirectional: false,
+            comparison_dim: 5,
+        };
+
+        println!("LSTM config:");
+        println!("  Input dim: {}", lstm_config.input_dim);
+        println!("  Hidden size: {}", lstm_config.hidden_size);
+        println!("  Learning rate: {}", lr);
+
+        // Create trainer
+        let device = Default::default();
+        let trainer = LSTMTrainer::<MyAutodiffBackend>::new(device, lstm_config, lr);
+
+        println!("\nStarting LSTM training...\n");
+
+        let history = trainer.train(train_dataset, val_dataset, epochs)?;
+
+        println!("\nLSTM Training complete!");
+        println!("  Best epoch: {}", history.best_epoch + 1);
+        println!(
+            "  Best val accuracy: {:.1}%",
+            history.val_accuracies.last().unwrap_or(&0.0) * 100.0
+        );
+
+        Ok(())
+    }
+
+    pub fn train_transformer(
+        config: &Config,
+        epochs: Option<usize>,
+        lr: f64,
+        d_model: usize,
+        batch_size: usize,
+    ) -> Result<()> {
+        use burn::backend::{Autodiff, NdArray};
+        use chrono::NaiveDate;
+        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
+        use rugby::model::rugby_net::RugbyNetConfig;
+        use rugby::training::TransformerTrainer;
+
+        type MyBackend = NdArray<f32>;
+        type MyAutodiffBackend = Autodiff<MyBackend>;
+
+        let epochs = epochs.unwrap_or(50);
+
+        println!("Initializing Transformer training...");
+
+        // Open database
+        let db = Database::open(&config.data.database_path)?;
+        let stats = db.get_stats()?;
+
+        if stats.match_count == 0 {
+            return Err(rugby::RugbyError::Config(
+                "No matches in database. Run 'rugby data sync' first.".to_string(),
+            ));
+        }
+
+        println!("Loaded {} matches from database", stats.match_count);
+
+        // Create datasets
+        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+        let dataset_config = DatasetConfig {
+            max_history: config.model.max_history,
+            min_history: 3,
+        };
+
+        println!("Creating training dataset (before {})...", train_cutoff);
+        let train_dataset =
+            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
+        println!("  {} training samples", train_dataset.len());
+
+        println!(
+            "Creating validation dataset ({} to {})...",
+            train_cutoff, val_end
+        );
+        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            train_cutoff,
+            val_end,
+            dataset_config,
+            train_dataset.score_norm,
+            *train_dataset.feature_norm(),
+        )?;
+        println!("  {} validation samples", val_dataset.len());
+
+        if train_dataset.is_empty() || val_dataset.is_empty() {
+            return Err(rugby::RugbyError::Config(
+                "Not enough data for training. Need matches before and after 2023.".to_string(),
+            ));
+        }
+
+        // Create Transformer config
+        let transformer_config = RugbyNetConfig {
+            input_dim: 15,
+            d_model,
+            n_heads: d_model / 16, // Ensure divisible
+            n_encoder_layers: 2,
+            n_cross_attn_layers: 1,
+            d_ff: d_model * 4,
+            head_hidden_dim: d_model / 2,
+            dropout: 0.1,
+            max_seq_len: config.model.max_history,
+            n_teams: 64,
+            team_embed_dim: 16,
+        };
+
+        println!("Transformer config:");
+        println!("  d_model: {}", transformer_config.d_model);
+        println!("  n_heads: {}", transformer_config.n_heads);
+        println!("  n_encoder_layers: {}", transformer_config.n_encoder_layers);
+        println!("  Learning rate: {}", lr);
+        println!("  Batch size: {}", batch_size);
+
+        // Create trainer
+        let device = Default::default();
+        let trainer = TransformerTrainer::<MyAutodiffBackend>::new(device, transformer_config, lr);
+
+        println!("\nStarting Transformer training...\n");
+
+        let history = trainer.train(train_dataset, val_dataset, epochs, batch_size)?;
+
+        println!("\nTransformer Training complete!");
+        println!("  Best epoch: {}", history.best_epoch + 1);
+        println!(
+            "  Best val accuracy: {:.1}%",
+            history.val_accuracies.last().unwrap_or(&0.0) * 100.0
+        );
+
+        Ok(())
+    }
+
+    pub fn tune_mlp(config: &Config, max_epochs: usize) -> Result<()> {
+        use burn::backend::{Autodiff, NdArray};
+        use chrono::NaiveDate;
+        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
+        use rugby::training::{MLPHyperparams, MLPTuner, RandomSplitDatasets};
+
+        type MyBackend = NdArray<f32>;
+        type MyAutodiffBackend = Autodiff<MyBackend>;
+
+        println!("Initializing MLP hyperparameter tuning (time-based splits)...");
+
+        // Open database
+        let db = Database::open(&config.data.database_path)?;
+        let stats = db.get_stats()?;
+
+        if stats.match_count == 0 {
+            return Err(rugby::RugbyError::Config(
+                "No matches in database. Run 'rugby data sync' first.".to_string(),
+            ));
+        }
+
+        println!("Loaded {} matches from database", stats.match_count);
+
+        // Time-based splits (same as train_mlp)
+        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let test_end = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+
+        let dataset_config = DatasetConfig {
+            max_history: config.model.max_history,
+            min_history: 3,
+        };
+
+        println!("Creating training dataset (before {})...", train_cutoff);
+        let train_dataset =
+            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
+        println!("  {} training samples", train_dataset.len());
+
+        println!(
+            "Creating validation dataset ({} to {})...",
+            train_cutoff, val_end
+        );
+        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            train_cutoff,
+            val_end,
+            dataset_config.clone(),
+            train_dataset.score_norm,
+            *train_dataset.feature_norm(),
+        )?;
+        println!("  {} validation samples", val_dataset.len());
+
+        println!(
+            "Creating test dataset ({} to {})...",
+            val_end, test_end
+        );
+        let test_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            val_end,
+            test_end,
+            dataset_config,
+            train_dataset.score_norm,
+            *train_dataset.feature_norm(),
+        )?;
+        println!("  {} test samples", test_dataset.len());
+
+        if train_dataset.is_empty() || val_dataset.is_empty() {
+            return Err(rugby::RugbyError::Config(
+                "Not enough data for training. Need matches before and after 2023.".to_string(),
+            ));
+        }
+
+        // Wrap in RandomSplitDatasets struct (reusing the tuner interface)
+        let datasets = RandomSplitDatasets {
+            train: train_dataset,
+            val: val_dataset,
+            test: test_dataset,
+        };
+
+        // Define hyperparameter search space
+        let hyperparams_list = vec![
+            // Different learning rates at 100 epochs
+            MLPHyperparams { learning_rate: 0.01, epochs: 100 },
+            MLPHyperparams { learning_rate: 0.05, epochs: 100 },
+            MLPHyperparams { learning_rate: 0.1, epochs: 100 },
+            MLPHyperparams { learning_rate: 0.2, epochs: 100 },
+            MLPHyperparams { learning_rate: 0.5, epochs: 100 },
+            MLPHyperparams { learning_rate: 1.0, epochs: 100 },
+            // More epochs for promising learning rates
+            MLPHyperparams { learning_rate: 0.1, epochs: 200 },
+            MLPHyperparams { learning_rate: 0.1, epochs: max_epochs },
+            MLPHyperparams { learning_rate: 0.05, epochs: max_epochs },
+            MLPHyperparams { learning_rate: 0.2, epochs: max_epochs },
+        ];
+
+        println!("\nTesting {} hyperparameter configurations...\n", hyperparams_list.len());
+
+        // Create tuner and run
+        let device = Default::default();
+        let tuner = MLPTuner::<MyAutodiffBackend>::new(device);
+        let results = tuner.tune(&datasets, hyperparams_list)?;
+
+        // Find best result by validation accuracy
+        let best = results
+            .iter()
+            .max_by(|a, b| a.val_acc.partial_cmp(&b.val_acc).unwrap())
+            .unwrap();
+
+        println!("\n=== Tuning Results (Time-Based Splits) ===\n");
+        println!("{:>8} {:>8} {:>10} {:>10} {:>10}", "LR", "Epochs", "Train%", "Val%", "Test%");
+        println!("{}", "-".repeat(50));
+
+        for r in &results {
+            let marker = if r.val_acc == best.val_acc { " *" } else { "" };
+            println!(
+                "{:>8.4} {:>8} {:>9.1}% {:>9.1}% {:>9.1}%{}",
+                r.hyperparams.learning_rate,
+                r.hyperparams.epochs,
+                r.train_acc * 100.0,
+                r.val_acc * 100.0,
+                r.test_acc * 100.0,
+                marker
+            );
+        }
+
+        println!("\nBest configuration:");
+        println!("  Learning rate: {}", best.hyperparams.learning_rate);
+        println!("  Epochs: {}", best.hyperparams.epochs);
+        println!("  Validation accuracy: {:.1}%", best.val_acc * 100.0);
+        println!("  Test accuracy: {:.1}%", best.test_acc * 100.0);
+
         Ok(())
     }
 }

@@ -32,7 +32,7 @@ pub struct EncoderConfig {
 impl Default for EncoderConfig {
     fn default() -> Self {
         EncoderConfig {
-            input_dim: 9, // MatchFeatures::DIM
+            input_dim: 15, // MatchFeatures::DIM (with travel + rolling stats)
             d_model: 128,
             n_heads: 8,
             n_layers: 4,
@@ -311,7 +311,7 @@ mod tests {
     fn test_encoder() {
         let device = Default::default();
         let config = EncoderConfig {
-            input_dim: 9,
+            input_dim: 15,
             d_model: 64,
             n_heads: 4,
             n_layers: 2,
@@ -323,7 +323,7 @@ mod tests {
         let encoder = TeamEncoder::<TestBackend>::new(&device, config);
 
         let x = Tensor::random(
-            [2, 10, 9],
+            [2, 10, 15],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );
