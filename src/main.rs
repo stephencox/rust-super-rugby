@@ -590,10 +590,8 @@ mod commands {
         // Output results
         match format {
             OutputFormat::Table => {
-                println!("┌────────────────────────────────────────────────────────────────────────┐");
-                println!("│  {} Super Rugby Pacific - Round {} Predictions                     │",
-                    year, fixtures.first().and_then(|f| f.round).unwrap_or(1));
-                println!("├────────────────────────────────────────────────────────────────────────┤");
+                let round_num = fixtures.first().and_then(|f| f.round).unwrap_or(1);
+                println!("\n{} Super Rugby Pacific - Round {} Predictions\n", year, round_num);
 
                 for (fixture, pred) in &predictions {
                     let winner = if pred.home_win_prob >= 0.5 {
@@ -608,14 +606,9 @@ mod commands {
                     };
                     let margin_abs = pred.margin.abs();
 
-                    println!("│  {}                                                        │", fixture.date);
-                    println!("│  {:15} vs {:15}                           │",
-                        fixture.home_team.name, fixture.away_team.name);
-                    println!("│  {} by {:.0} pts ({:.1}%)                                    │",
-                        winner, margin_abs, win_prob * 100.0);
-                    println!("├────────────────────────────────────────────────────────────────────────┤");
+                    println!("  {}  {:15} vs {:15}", fixture.date, fixture.home_team.name, fixture.away_team.name);
+                    println!("           → {} by {:.0} pts ({:.1}%)\n", winner, margin_abs, win_prob * 100.0);
                 }
-                println!("└────────────────────────────────────────────────────────────────────────┘");
             }
             OutputFormat::Json => {
                 let json_preds: Vec<_> = predictions.iter().map(|(f, pred)| {
@@ -965,11 +958,8 @@ mod commands {
         let win_prob = if home_win_prob >= 0.5 { home_win_prob } else { 1.0 - home_win_prob };
         let margin_abs = margin.abs();
 
-        println!("\n┌─────────────────────────────────────────────────┐");
-        println!("│  {} vs {}", home, away);
-        println!("├─────────────────────────────────────────────────┤");
-        println!("│  {} by {:.0} pts ({:.1}%)", winner, margin_abs, win_prob * 100.0);
-        println!("└─────────────────────────────────────────────────┘\n");
+        println!("\n  {} vs {}", home, away);
+        println!("  → {} by {:.0} pts ({:.1}%)\n", winner, margin_abs, win_prob * 100.0);
 
         Ok(())
     }
