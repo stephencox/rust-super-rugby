@@ -42,6 +42,9 @@ enum Commands {
         /// Weight initialization: default, small, or zero
         #[arg(long, default_value = "default")]
         init: String,
+        /// Train on all data through 2025 for production predictions
+        #[arg(long)]
+        production: bool,
     },
     /// Train LSTM model (uses team history sequences)
     TrainLstm {
@@ -191,8 +194,8 @@ fn main() {
             DataCommands::Fixtures { year } => commands::data_fixtures(&config, year),
             DataCommands::Status => commands::data_status(&config),
         },
-        Commands::Train { epochs, lr, optimizer, init } => {
-            commands::train(&config, epochs, lr, &optimizer, &init)
+        Commands::Train { epochs, lr, optimizer, init, production } => {
+            commands::train(&config, epochs, lr, &optimizer, &init, production)
         }
         Commands::TrainLstm { epochs, lr, hidden_size } => {
             commands::train_lstm(&config, epochs, lr, hidden_size)
@@ -646,7 +649,7 @@ mod commands {
         Ok(())
     }
 
-    pub fn train(config: &Config, epochs: Option<usize>, lr: f64, optimizer: &str, init: &str) -> Result<()> {
+    pub fn train(config: &Config, epochs: Option<usize>, lr: f64, optimizer: &str, init: &str, production: bool) -> Result<()> {
         use burn::backend::{Autodiff, NdArray};
         use chrono::NaiveDate;
         use rugby::data::dataset::{DatasetConfig, RugbyDataset};
@@ -678,7 +681,12 @@ mod commands {
             }
         };
 
-        println!("Initializing multi-task MLP training...");
+        if production {
+            println!("Initializing PRODUCTION multi-task MLP training...");
+            println!("  Training on ALL data through 2025");
+        } else {
+            println!("Initializing multi-task MLP training...");
+        }
         println!("  Optimizer: {:?}", optimizer_type);
         println!("  Init method: {:?}", init_method);
 
@@ -694,37 +702,64 @@ mod commands {
 
         println!("Loaded {} matches from database", stats.match_count);
 
-        // Create datasets with time-based split
-        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-
         let dataset_config = DatasetConfig {
             max_history: config.model.max_history,
             min_history: 3,
         };
 
-        println!("Creating training dataset (before {})...", train_cutoff);
-        let train_dataset =
-            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
-        println!("  {} training samples", train_dataset.len());
+        // Create datasets - production mode uses all data through 2025
+        let (train_dataset, val_dataset) = if production {
+            // Production: train on all data through 2025, use 2025 as validation
+            let train_cutoff = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+            let val_start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
 
-        println!(
-            "Creating validation dataset ({} to {})...",
-            train_cutoff, val_end
-        );
-        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
-            &db,
-            train_cutoff,
-            val_end,
-            dataset_config,
-            train_dataset.score_norm,
-            *train_dataset.feature_norm(),
-        )?;
-        println!("  {} validation samples", val_dataset.len());
+            println!("Creating training dataset (before {})...", train_cutoff);
+            let train_dataset =
+                RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
+            println!("  {} training samples", train_dataset.len());
+
+            println!("Creating validation dataset (2025 season)...");
+            let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+                &db,
+                val_start,
+                train_cutoff,
+                dataset_config,
+                train_dataset.score_norm,
+                *train_dataset.feature_norm(),
+            )?;
+            println!("  {} validation samples", val_dataset.len());
+
+            (train_dataset, val_dataset)
+        } else {
+            // Development: train on pre-2023, validate on 2023
+            let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+            let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+            println!("Creating training dataset (before {})...", train_cutoff);
+            let train_dataset =
+                RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
+            println!("  {} training samples", train_dataset.len());
+
+            println!(
+                "Creating validation dataset ({} to {})...",
+                train_cutoff, val_end
+            );
+            let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+                &db,
+                train_cutoff,
+                val_end,
+                dataset_config,
+                train_dataset.score_norm,
+                *train_dataset.feature_norm(),
+            )?;
+            println!("  {} validation samples", val_dataset.len());
+
+            (train_dataset, val_dataset)
+        };
 
         if train_dataset.is_empty() || val_dataset.is_empty() {
             return Err(rugby::RugbyError::Config(
-                "Not enough data for training. Need matches before and after 2023.".to_string(),
+                "Not enough data for training.".to_string(),
             ));
         }
 
