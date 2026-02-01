@@ -1259,7 +1259,8 @@ mod commands {
     }
 
     pub fn tune_transformer(config: &Config, max_epochs: usize) -> Result<()> {
-        use burn::backend::{Autodiff, NdArray};
+        use burn::backend::ndarray::NdArray;
+        use burn::backend::Autodiff;
         use burn::data::dataloader::DataLoaderBuilder;
         use burn::optim::{AdamConfig, GradientsParams, Optimizer};
         use burn::tensor::activation::sigmoid;
@@ -1368,7 +1369,8 @@ mod commands {
         }
         let mut results: Vec<TransformerResult> = Vec::new();
 
-        let device: <MyAutodiffBackend as burn::tensor::backend::Backend>::Device = Default::default();
+        let device = Default::default();
+        println!("Using CPU (NdArray) backend");
 
         for (lr, d_model, batch_size, epochs) in &hyperparams {
             println!("Testing lr={}, d_model={}, batch_size={}, epochs={}", lr, d_model, batch_size, epochs);
