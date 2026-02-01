@@ -79,6 +79,12 @@ enum Commands {
         #[arg(long, default_value = "500")]
         max_epochs: usize,
     },
+    /// Tune LSTM hyperparameters with time-based train/val/test splits
+    TuneLstm {
+        /// Maximum epochs to try
+        #[arg(long, default_value = "200")]
+        max_epochs: usize,
+    },
     /// Predict match outcomes
     Predict {
         /// Home team name
@@ -205,6 +211,7 @@ fn main() {
             batch_size,
         } => commands::train_transformer(&config, epochs, lr, d_model, batch_size),
         Commands::TuneMlp { max_epochs } => commands::tune_mlp(&config, max_epochs),
+        Commands::TuneLstm { max_epochs } => commands::tune_lstm(&config, max_epochs),
         Commands::Predict {
             home,
             away,
@@ -952,6 +959,292 @@ mod commands {
         println!("\nBest configuration:");
         println!("  Learning rate: {}", best.hyperparams.learning_rate);
         println!("  Epochs: {}", best.hyperparams.epochs);
+        println!("  Validation accuracy: {:.1}%", best.val_acc * 100.0);
+        println!("  Test accuracy: {:.1}%", best.test_acc * 100.0);
+
+        Ok(())
+    }
+
+    pub fn tune_lstm(config: &Config, max_epochs: usize) -> Result<()> {
+        use burn::backend::{Autodiff, NdArray};
+        use burn::data::dataloader::DataLoaderBuilder;
+        use burn::nn::Linear;
+        use burn::optim::{GradientsParams, Optimizer, SgdConfig};
+        use burn::tensor::activation::sigmoid;
+        use burn::tensor::ElementConversion;
+        use chrono::NaiveDate;
+        use rugby::data::dataset::{DatasetConfig, MatchBatcher, RugbyDataset};
+        use rugby::model::lstm::{LSTMConfig, LSTMModel};
+        use rugby::training::mlp_trainer::ComparisonNormalization;
+
+        type MyBackend = NdArray<f32>;
+        type MyAutodiffBackend = Autodiff<MyBackend>;
+
+        println!("Initializing LSTM hyperparameter tuning (time-based splits)...");
+
+        // Open database
+        let db = Database::open(&config.data.database_path)?;
+        let stats = db.get_stats()?;
+
+        if stats.match_count == 0 {
+            return Err(rugby::RugbyError::Config(
+                "No matches in database. Run 'rugby data sync' first.".to_string(),
+            ));
+        }
+
+        println!("Loaded {} matches from database", stats.match_count);
+
+        // Time-based splits
+        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let test_end = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+
+        let dataset_config = DatasetConfig {
+            max_history: config.model.max_history,
+            min_history: 3,
+        };
+
+        println!("Creating training dataset (before {})...", train_cutoff);
+        let train_dataset =
+            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
+        println!("  {} training samples", train_dataset.len());
+
+        println!(
+            "Creating validation dataset ({} to {})...",
+            train_cutoff, val_end
+        );
+        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            train_cutoff,
+            val_end,
+            dataset_config.clone(),
+            train_dataset.score_norm,
+            *train_dataset.feature_norm(),
+        )?;
+        println!("  {} validation samples", val_dataset.len());
+
+        println!(
+            "Creating test dataset ({} to {})...",
+            val_end, test_end
+        );
+        let test_dataset = RugbyDataset::from_matches_in_range_with_norm(
+            &db,
+            val_end,
+            test_end,
+            dataset_config,
+            train_dataset.score_norm,
+            *train_dataset.feature_norm(),
+        )?;
+        println!("  {} test samples", test_dataset.len());
+
+        if train_dataset.is_empty() || val_dataset.is_empty() {
+            return Err(rugby::RugbyError::Config(
+                "Not enough data for training. Need matches before and after 2023.".to_string(),
+            ));
+        }
+
+        // Compute feature normalization
+        let feature_norm = ComparisonNormalization::from_dataset(&train_dataset);
+
+        // Define hyperparameter search space: (learning_rate, hidden_size, epochs)
+        let hyperparams: Vec<(f64, usize, usize)> = vec![
+            // Different learning rates with hidden_size=64
+            (0.001, 64, 100),
+            (0.005, 64, 100),
+            (0.01, 64, 100),
+            (0.02, 64, 100),
+            (0.05, 64, 100),
+            // Different hidden sizes with lr=0.01
+            (0.01, 32, 100),
+            (0.01, 128, 100),
+            // More epochs for promising configs
+            (0.01, 64, max_epochs),
+            (0.005, 64, max_epochs),
+        ];
+
+        println!("\nTesting {} hyperparameter configurations...\n", hyperparams.len());
+
+        // Results storage
+        struct LstmResult {
+            lr: f64,
+            hidden_size: usize,
+            epochs: usize,
+            train_acc: f32,
+            val_acc: f32,
+            test_acc: f32,
+        }
+        let mut results: Vec<LstmResult> = Vec::new();
+
+        let device: <MyAutodiffBackend as burn::tensor::backend::Backend>::Device = Default::default();
+
+        for (lr, hidden_size, epochs) in &hyperparams {
+            println!("Testing lr={}, hidden_size={}, epochs={}", lr, hidden_size, epochs);
+
+            // Create model
+            let lstm_config = LSTMConfig {
+                input_dim: 15,
+                hidden_size: *hidden_size,
+                num_layers: 1,
+                bidirectional: false,
+                comparison_dim: 5,
+            };
+            let mut model = LSTMModel::<MyAutodiffBackend>::new(&device, lstm_config);
+            let mut optimizer = SgdConfig::new().init();
+
+            // Create data loaders
+            let batcher = MatchBatcher::<MyAutodiffBackend>::new(device.clone());
+            let train_loader = DataLoaderBuilder::new(batcher.clone())
+                .batch_size(train_dataset.len())
+                .build(train_dataset.clone());
+            let val_loader = DataLoaderBuilder::new(batcher.clone())
+                .batch_size(val_dataset.len())
+                .build(val_dataset.clone());
+            let test_loader = DataLoaderBuilder::new(batcher)
+                .batch_size(test_dataset.len())
+                .build(test_dataset.clone());
+
+            let mut best_val_acc = 0.0f32;
+            let mut best_model = model.clone();
+
+            // Training loop
+            for _epoch in 0..*epochs {
+                let train_batch = train_loader.iter().next().unwrap();
+                let comparison = feature_norm.normalize(train_batch.comparison.clone());
+                let y_train = train_batch.home_win.clone().unsqueeze_dim(1);
+
+                // Forward
+                let (win_logit, _, _) = model.forward(
+                    train_batch.home_history.clone(),
+                    train_batch.away_history.clone(),
+                    comparison,
+                );
+                let probs = sigmoid(win_logit);
+
+                // Loss
+                let eps = 1e-7;
+                let probs_clamped = probs.clone().clamp(eps, 1.0 - eps);
+                let loss = y_train.clone().neg() * probs_clamped.clone().log()
+                    - (y_train.clone().neg() + 1.0) * (probs_clamped.neg() + 1.0).log();
+                let loss = loss.mean();
+
+                // Backward
+                let grads = loss.backward();
+                let grads_params = GradientsParams::from_grads(grads, &model);
+                model = optimizer.step(*lr, model, grads_params);
+
+                // Check validation
+                let val_batch = val_loader.iter().next().unwrap();
+                let val_comparison = feature_norm.normalize(val_batch.comparison.clone());
+                let (val_logit, _, _) = model.forward(
+                    val_batch.home_history.clone(),
+                    val_batch.away_history.clone(),
+                    val_comparison,
+                );
+                let val_probs = sigmoid(val_logit);
+                let val_probs_data = val_probs.clone().into_data();
+                let val_targets_data = val_batch.home_win.clone().into_data();
+                let val_probs_slice: &[f32] = val_probs_data.as_slice().unwrap();
+                let val_targets_slice: &[f32] = val_targets_data.as_slice().unwrap();
+                let val_correct = val_probs_slice
+                    .iter()
+                    .zip(val_targets_slice.iter())
+                    .filter(|(p, t)| (**p >= 0.5) == (**t >= 0.5))
+                    .count();
+                let val_acc = val_correct as f32 / val_probs_slice.len() as f32;
+
+                if val_acc > best_val_acc {
+                    best_val_acc = val_acc;
+                    best_model = model.clone();
+                }
+            }
+
+            // Evaluate best model
+            let train_batch = train_loader.iter().next().unwrap();
+            let comparison = feature_norm.normalize(train_batch.comparison.clone());
+            let (train_logit, _, _) = best_model.forward(
+                train_batch.home_history.clone(),
+                train_batch.away_history.clone(),
+                comparison,
+            );
+            let train_probs = sigmoid(train_logit);
+            let train_probs_data = train_probs.into_data();
+            let train_targets_data = train_batch.home_win.clone().into_data();
+            let train_probs_slice: &[f32] = train_probs_data.as_slice().unwrap();
+            let train_targets_slice: &[f32] = train_targets_data.as_slice().unwrap();
+            let train_correct = train_probs_slice
+                .iter()
+                .zip(train_targets_slice.iter())
+                .filter(|(p, t)| (**p >= 0.5) == (**t >= 0.5))
+                .count();
+            let train_acc = train_correct as f32 / train_probs_slice.len() as f32;
+
+            let test_batch = test_loader.iter().next().unwrap();
+            let test_comparison = feature_norm.normalize(test_batch.comparison.clone());
+            let (test_logit, _, _) = best_model.forward(
+                test_batch.home_history.clone(),
+                test_batch.away_history.clone(),
+                test_comparison,
+            );
+            let test_probs = sigmoid(test_logit);
+            let test_probs_data = test_probs.into_data();
+            let test_targets_data = test_batch.home_win.clone().into_data();
+            let test_probs_slice: &[f32] = test_probs_data.as_slice().unwrap();
+            let test_targets_slice: &[f32] = test_targets_data.as_slice().unwrap();
+            let test_correct = test_probs_slice
+                .iter()
+                .zip(test_targets_slice.iter())
+                .filter(|(p, t)| (**p >= 0.5) == (**t >= 0.5))
+                .count();
+            let test_acc = test_correct as f32 / test_probs_slice.len() as f32;
+
+            println!(
+                "  train_acc={:.1}%, val_acc={:.1}%, test_acc={:.1}%",
+                train_acc * 100.0,
+                best_val_acc * 100.0,
+                test_acc * 100.0
+            );
+
+            results.push(LstmResult {
+                lr: *lr,
+                hidden_size: *hidden_size,
+                epochs: *epochs,
+                train_acc,
+                val_acc: best_val_acc,
+                test_acc,
+            });
+        }
+
+        // Find best result
+        let best = results
+            .iter()
+            .max_by(|a, b| a.val_acc.partial_cmp(&b.val_acc).unwrap())
+            .unwrap();
+
+        println!("\n=== LSTM Tuning Results (Time-Based Splits) ===\n");
+        println!(
+            "{:>8} {:>8} {:>8} {:>10} {:>10} {:>10}",
+            "LR", "Hidden", "Epochs", "Train%", "Val%", "Test%"
+        );
+        println!("{}", "-".repeat(60));
+
+        for r in &results {
+            let marker = if r.val_acc == best.val_acc { " *" } else { "" };
+            println!(
+                "{:>8.4} {:>8} {:>8} {:>9.1}% {:>9.1}% {:>9.1}%{}",
+                r.lr,
+                r.hidden_size,
+                r.epochs,
+                r.train_acc * 100.0,
+                r.val_acc * 100.0,
+                r.test_acc * 100.0,
+                marker
+            );
+        }
+
+        println!("\nBest configuration:");
+        println!("  Learning rate: {}", best.lr);
+        println!("  Hidden size: {}", best.hidden_size);
+        println!("  Epochs: {}", best.epochs);
         println!("  Validation accuracy: {:.1}%", best.val_acc * 100.0);
         println!("  Test accuracy: {:.1}%", best.test_acc * 100.0);
 
