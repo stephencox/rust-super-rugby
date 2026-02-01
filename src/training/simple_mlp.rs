@@ -28,7 +28,7 @@ where
 {
     /// Create a new trainer
     pub fn new(device: B::Device, learning_rate: f64) -> Self {
-        let model = LinearConfig::new(5, 1).init(&device);
+        let model = LinearConfig::new(15, 1).init(&device);
         let optimizer = SgdConfig::new().init();
 
         SimpleMLPTrainer {

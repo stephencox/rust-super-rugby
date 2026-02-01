@@ -29,7 +29,7 @@ impl Default for HeadsConfig {
             input_dim: 128,
             hidden_dim: 64,
             dropout: 0.1,
-            comparison_dim: 5,
+            comparison_dim: 15,
         }
     }
 }
@@ -181,7 +181,7 @@ mod tests {
             input_dim: 64,
             hidden_dim: 32,
             dropout: 0.0,
-            comparison_dim: 5,
+            comparison_dim: 15,
         };
 
         let heads = PredictionHeads::<TestBackend>::new(&device, config);
@@ -205,7 +205,7 @@ mod tests {
             input_dim: 128,
             hidden_dim: 64,
             dropout: 0.1,
-            comparison_dim: 5,
+            comparison_dim: 15,
         };
 
         let heads = PredictionHeads::<TestBackend>::new(&device, config);

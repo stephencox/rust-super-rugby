@@ -12,25 +12,28 @@ use crate::model::mlp::MLPModel;
 use crate::training::metrics::{Metrics, TrainingHistory};
 use crate::Result;
 
-/// Feature normalization for comparison features
-#[derive(Debug, Clone, Copy)]
+/// Feature normalization for comparison features (z-score normalization)
+#[derive(Debug, Clone)]
 pub struct ComparisonNormalization {
-    pub mean: [f32; 5],
-    pub std: [f32; 5],
+    pub mean: Vec<f32>,
+    pub std: Vec<f32>,
 }
 
 impl ComparisonNormalization {
+    /// Dimension of comparison features
+    pub const DIM: usize = 15;
+
     /// Compute from training dataset
     pub fn from_dataset(dataset: &RugbyDataset) -> Self {
         use burn::data::dataset::Dataset;
 
-        let mut sum = [0.0f32; 5];
-        let mut sum_sq = [0.0f32; 5];
+        let mut sum = vec![0.0f32; Self::DIM];
+        let mut sum_sq = vec![0.0f32; Self::DIM];
 
         for i in 0..dataset.len() {
             if let Some(sample) = dataset.get(i) {
                 let vals = sample.comparison.to_vec();
-                for j in 0..5 {
+                for j in 0..Self::DIM {
                     sum[j] += vals[j];
                     sum_sq[j] += vals[j] * vals[j];
                 }
@@ -38,26 +41,17 @@ impl ComparisonNormalization {
         }
 
         let n = dataset.len() as f32;
-        let mean = [
-            sum[0] / n,
-            sum[1] / n,
-            sum[2] / n,
-            sum[3] / n,
-            sum[4] / n,
-        ];
-
-        let std = [
-            ((sum_sq[0] / n - mean[0] * mean[0]).sqrt()).max(0.001),
-            ((sum_sq[1] / n - mean[1] * mean[1]).sqrt()).max(0.001),
-            ((sum_sq[2] / n - mean[2] * mean[2]).sqrt()).max(0.001),
-            ((sum_sq[3] / n - mean[3] * mean[3]).sqrt()).max(0.001),
-            ((sum_sq[4] / n - mean[4] * mean[4]).sqrt()).max(0.001),
-        ];
+        let mean: Vec<f32> = sum.iter().map(|s| s / n).collect();
+        let std: Vec<f32> = sum_sq
+            .iter()
+            .zip(mean.iter())
+            .map(|(sq, m)| ((sq / n - m * m).sqrt()).max(0.001))
+            .collect();
 
         ComparisonNormalization { mean, std }
     }
 
-    /// Normalize a comparison tensor
+    /// Normalize a comparison tensor using z-score: (x - mean) / std
     pub fn normalize<B: burn::tensor::backend::Backend>(
         &self,
         comparison: Tensor<B, 2>,

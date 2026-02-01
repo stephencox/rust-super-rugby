@@ -190,7 +190,7 @@ where
         hyperparams: &MLPHyperparams,
     ) -> Result<TuningResult> {
         // Create model
-        let mut model: Linear<B> = LinearConfig::new(5, 1).init(&self.device);
+        let mut model: Linear<B> = LinearConfig::new(15, 1).init(&self.device);
         let mut optimizer = SgdConfig::new().init();
 
         // Create data loaders (full batch)

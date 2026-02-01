@@ -29,7 +29,7 @@ impl Default for LSTMConfig {
             hidden_size: 64,
             num_layers: 1,
             bidirectional: false,
-            comparison_dim: 5,  // MatchComparison::DIM
+            comparison_dim: 15, // MatchComparison::DIM
         }
     }
 }

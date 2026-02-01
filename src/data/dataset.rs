@@ -181,9 +181,10 @@ impl TeamSummary {
     }
 }
 
-/// Match-level comparative features (differences between teams)
+/// Match-level comparative features (differences between teams + raw stats)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MatchComparison {
+    // Differential features (5)
     /// Win rate difference (home - away)
     pub win_rate_diff: f32,
     /// Margin average difference (home - away), normalized
@@ -194,10 +195,24 @@ pub struct MatchComparison {
     pub log5: f32,
     /// Is local derby (same country)
     pub is_local: f32,
+
+    // Home team raw stats (5)
+    pub home_win_rate: f32,
+    pub home_margin_avg: f32,
+    pub home_pythagorean: f32,
+    pub home_pf_avg: f32,
+    pub home_pa_avg: f32,
+
+    // Away team raw stats (5)
+    pub away_win_rate: f32,
+    pub away_margin_avg: f32,
+    pub away_pythagorean: f32,
+    pub away_pf_avg: f32,
+    pub away_pa_avg: f32,
 }
 
 impl MatchComparison {
-    pub const DIM: usize = 5;
+    pub const DIM: usize = 15;
 
     /// Compute Log5 probability from two win rates
     pub fn log5_prob(p_a: f32, p_b: f32) -> f32 {
@@ -210,17 +225,51 @@ impl MatchComparison {
     }
 
     pub fn from_summaries(home: &TeamSummary, away: &TeamSummary, is_local: bool) -> Self {
+        // Store raw values - z-score normalization is applied at training time
+        // by ComparisonNormalization
         MatchComparison {
+            // Differentials
             win_rate_diff: home.win_rate - away.win_rate,
-            margin_diff: (home.margin_avg - away.margin_avg) / 15.0, // Normalize by typical margin std
+            margin_diff: home.margin_avg - away.margin_avg,
             pythagorean_diff: home.pythagorean - away.pythagorean,
             log5: Self::log5_prob(home.win_rate.max(0.01).min(0.99), away.win_rate.max(0.01).min(0.99)),
             is_local: if is_local { 1.0 } else { 0.0 },
+            // Home team raw stats
+            home_win_rate: home.win_rate,
+            home_margin_avg: home.margin_avg,
+            home_pythagorean: home.pythagorean,
+            home_pf_avg: home.pf_avg,
+            home_pa_avg: home.pa_avg,
+            // Away team raw stats
+            away_win_rate: away.win_rate,
+            away_margin_avg: away.margin_avg,
+            away_pythagorean: away.pythagorean,
+            away_pf_avg: away.pf_avg,
+            away_pa_avg: away.pa_avg,
         }
     }
 
     pub fn to_vec(&self) -> Vec<f32> {
-        vec![self.win_rate_diff, self.margin_diff, self.pythagorean_diff, self.log5, self.is_local]
+        vec![
+            // Differentials (5)
+            self.win_rate_diff,
+            self.margin_diff,
+            self.pythagorean_diff,
+            self.log5,
+            self.is_local,
+            // Home team stats (5)
+            self.home_win_rate,
+            self.home_margin_avg,
+            self.home_pythagorean,
+            self.home_pf_avg,
+            self.home_pa_avg,
+            // Away team stats (5)
+            self.away_win_rate,
+            self.away_margin_avg,
+            self.away_pythagorean,
+            self.away_pf_avg,
+            self.away_pa_avg,
+        ]
     }
 }
 

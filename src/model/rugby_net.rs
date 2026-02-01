@@ -101,11 +101,11 @@ impl RugbyNetConfig {
     fn heads_config(&self) -> HeadsConfig {
         HeadsConfig {
             // Input = fused representation + home embedding + away embedding + comparison features
-            // Comparison features: win_rate_diff, margin_diff, pythagorean_diff, log5, is_local = 5
-            input_dim: self.d_model + 2 * self.team_embed_dim + 5,
+            // Comparison features: 5 diffs + 5 home stats + 5 away stats = 15
+            input_dim: self.d_model + 2 * self.team_embed_dim + 15,
             hidden_dim: self.head_hidden_dim,
             dropout: self.dropout,
-            comparison_dim: 5, // Comparison features dimension for direct path
+            comparison_dim: 15, // Comparison features dimension for direct path
         }
     }
 }
