@@ -1,6 +1,5 @@
 //! Training loop for MLP model
 
-use burn::nn::{Linear, LinearConfig};
 use burn::optim::{GradientsParams, Optimizer, SgdConfig};
 use burn::tensor::activation::sigmoid;
 use burn::tensor::backend::AutodiffBackend;
@@ -13,7 +12,7 @@ use crate::training::metrics::{Metrics, TrainingHistory};
 use crate::Result;
 
 /// Feature normalization for comparison features (z-score normalization)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComparisonNormalization {
     pub mean: Vec<f32>,
     pub std: Vec<f32>,

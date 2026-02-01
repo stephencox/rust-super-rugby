@@ -28,23 +28,20 @@ enum Commands {
         #[command(subcommand)]
         action: DataCommands,
     },
-    /// Train the prediction model (transformer architecture)
+    /// Train the MLP model (comparison features only)
     Train {
         /// Override number of epochs
         #[arg(long)]
         epochs: Option<usize>,
-        /// Continue from checkpoint
-        #[arg(long)]
-        resume: bool,
-    },
-    /// Train the MLP baseline model (comparison features only)
-    TrainMlp {
-        /// Override number of epochs
-        #[arg(long)]
-        epochs: Option<usize>,
-        /// Learning rate (0.1 matches Python baseline)
-        #[arg(long, default_value = "0.1")]
+        /// Learning rate (0.1 for SGD, 0.001 for Adam)
+        #[arg(long, default_value = "0.001")]
         lr: f64,
+        /// Optimizer: sgd or adam
+        #[arg(long, default_value = "adam")]
+        optimizer: String,
+        /// Weight initialization: default, small, or zero
+        #[arg(long, default_value = "default")]
+        init: String,
     },
     /// Train LSTM model (uses team history sequences)
     TrainLstm {
@@ -58,21 +55,6 @@ enum Commands {
         #[arg(long, default_value = "64")]
         hidden_size: usize,
     },
-    /// Train Transformer model (RugbyNet with cross-attention)
-    TrainTransformer {
-        /// Override number of epochs
-        #[arg(long)]
-        epochs: Option<usize>,
-        /// Learning rate
-        #[arg(long, default_value = "0.0001")]
-        lr: f64,
-        /// Model dimension
-        #[arg(long, default_value = "64")]
-        d_model: usize,
-        /// Batch size (0 for auto)
-        #[arg(long, default_value = "32")]
-        batch_size: usize,
-    },
     /// Tune MLP hyperparameters with time-based train/val/test splits
     TuneMlp {
         /// Maximum epochs to try
@@ -85,24 +67,21 @@ enum Commands {
         #[arg(long, default_value = "200")]
         max_epochs: usize,
     },
-    /// Tune Transformer hyperparameters with time-based train/val/test splits
-    TuneTransformer {
-        /// Maximum epochs to try
-        #[arg(long, default_value = "100")]
-        max_epochs: usize,
-    },
-    /// Predict match outcomes
+    /// Predict match outcomes for a single match
     Predict {
         /// Home team name
-        home: Option<String>,
+        home: String,
         /// Away team name
-        away: Option<String>,
-        /// Predict all matches in a round
+        away: String,
+    },
+    /// Predict upcoming fixtures from Wikipedia
+    PredictNext {
+        /// Year of the season (default: 2026)
+        #[arg(long, default_value = "2026")]
+        year: u16,
+        /// Only show fixtures for specific round
         #[arg(long)]
         round: Option<u8>,
-        /// Input fixture file (JSON)
-        #[arg(long)]
-        fixture: Option<String>,
         /// Output format
         #[arg(long, default_value = "table")]
         format: OutputFormat,
@@ -134,6 +113,12 @@ enum DataCommands {
     ParseCache {
         /// Directory containing cached HTML files
         dir: String,
+    },
+    /// Fetch upcoming fixtures for a season
+    Fixtures {
+        /// Year to fetch fixtures for (default: current year)
+        #[arg(default_value = "2026")]
+        year: u16,
     },
     /// Show database status
     Status,
@@ -203,29 +188,21 @@ fn main() {
                 offline,
             } => commands::data_sync(&config, source, cache, offline),
             DataCommands::ParseCache { dir } => commands::parse_cache(&config, &dir),
+            DataCommands::Fixtures { year } => commands::data_fixtures(&config, year),
             DataCommands::Status => commands::data_status(&config),
         },
-        Commands::Train { epochs, resume } => commands::train(&config, epochs, resume),
-        Commands::TrainMlp { epochs, lr } => commands::train_mlp(&config, epochs, lr),
+        Commands::Train { epochs, lr, optimizer, init } => {
+            commands::train(&config, epochs, lr, &optimizer, &init)
+        }
         Commands::TrainLstm { epochs, lr, hidden_size } => {
             commands::train_lstm(&config, epochs, lr, hidden_size)
         }
-        Commands::TrainTransformer {
-            epochs,
-            lr,
-            d_model,
-            batch_size,
-        } => commands::train_transformer(&config, epochs, lr, d_model, batch_size),
         Commands::TuneMlp { max_epochs } => commands::tune_mlp(&config, max_epochs),
         Commands::TuneLstm { max_epochs } => commands::tune_lstm(&config, max_epochs),
-        Commands::TuneTransformer { max_epochs } => commands::tune_transformer(&config, max_epochs),
-        Commands::Predict {
-            home,
-            away,
-            round,
-            fixture,
-            format,
-        } => commands::predict(&config, home, away, round, fixture, format),
+        Commands::Predict { home, away } => commands::predict(&config, &home, &away),
+        Commands::PredictNext { year, round, format } => {
+            commands::predict_next(&config, year, round, format)
+        }
         Commands::Model { action } => match action {
             ModelCommands::Info => commands::model_info(&config),
             ModelCommands::Export { output } => commands::model_export(&config, &output),
@@ -354,22 +331,356 @@ mod commands {
         Ok(())
     }
 
-    pub fn train(config: &Config, epochs: Option<usize>, _resume: bool) -> Result<()> {
-        use burn::backend::{Autodiff, Wgpu};
-        use chrono::NaiveDate;
-        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
-        use rugby::model::rugby_net::{RugbyNet, RugbyNetConfig};
-        use rugby::training::Trainer;
+    pub fn data_fixtures(_config: &Config, year: u16) -> Result<()> {
+        println!("Fetching {} Super Rugby Pacific fixtures from Wikipedia...", year);
 
-        type MyBackend = Wgpu<f32, i32>;
-        type MyAutodiffBackend = Autodiff<MyBackend>;
+        let scraper = WikipediaScraper::new();
+        let fixtures = scraper.fetch_fixtures(year)?;
 
-        let mut training_config = config.clone();
-        if let Some(e) = epochs {
-            training_config.training.epochs = e;
+        if fixtures.is_empty() {
+            println!("No upcoming fixtures found for {}.", year);
+            println!("Note: Only fixtures WITHOUT scores are returned (upcoming matches).");
+            return Ok(());
         }
 
-        println!("Initializing training...");
+        println!("\nFound {} upcoming fixtures for {}:\n", fixtures.len(), year);
+
+        // Group by round
+        let mut by_round: std::collections::BTreeMap<Option<u8>, Vec<_>> = std::collections::BTreeMap::new();
+        for f in &fixtures {
+            by_round.entry(f.round).or_default().push(f);
+        }
+
+        for (round, round_fixtures) in by_round {
+            match round {
+                Some(r) => println!("Round {}:", r),
+                None => println!("Round TBD:"),
+            }
+            for f in round_fixtures {
+                println!(
+                    "  {} - {} vs {}",
+                    f.date, f.home_team.name, f.away_team.name
+                );
+                if let Some(venue) = &f.venue {
+                    println!("         at {}", venue);
+                }
+            }
+            println!();
+        }
+
+        Ok(())
+    }
+
+    pub fn predict_next(
+        config: &Config,
+        year: u16,
+        round_filter: Option<u8>,
+        format: OutputFormat,
+    ) -> Result<()> {
+        use burn::backend::NdArray;
+        use burn::nn::{Linear, LinearConfig};
+        use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+        use burn::tensor::activation::sigmoid;
+        use burn::tensor::Tensor;
+        use rugby::data::dataset::{MatchComparison, TeamSummary};
+        use rugby::training::mlp_trainer::ComparisonNormalization;
+
+        type MyBackend = NdArray<f32>;
+
+        // Check for MLP model
+        let model_path = format!("{}_mlp", config.data.model_path);
+        let model_file = format!("{}.mpk", model_path);
+        let norm_file = format!("{}_norm.json", model_path);
+
+        if !std::path::Path::new(&model_file).exists() {
+            println!("MLP model not found at {}", model_file);
+            println!("Train it with: rugby train-mlp --epochs 200 --lr 0.1");
+            return Err(rugby::RugbyError::NoModel);
+        }
+
+        println!("Fetching {} Super Rugby Pacific fixtures...", year);
+        let scraper = WikipediaScraper::new();
+        let fixtures = scraper.fetch_fixtures(year)?;
+
+        if fixtures.is_empty() {
+            println!("No upcoming fixtures found for {}.", year);
+            return Ok(());
+        }
+
+        // Filter by round if specified
+        let fixtures: Vec<_> = if let Some(r) = round_filter {
+            fixtures.into_iter().filter(|f| f.round == Some(r)).collect()
+        } else {
+            // Find the earliest round with fixtures
+            let min_round = fixtures.iter().filter_map(|f| f.round).min();
+            if let Some(r) = min_round {
+                println!("Predicting Round {} fixtures...\n", r);
+                fixtures.into_iter().filter(|f| f.round == Some(r)).collect()
+            } else {
+                // No round info, take earliest matches by date
+                let min_date = fixtures.iter().map(|f| f.date).min().unwrap();
+                fixtures.into_iter().filter(|f| f.date == min_date).collect()
+            }
+        };
+
+        if fixtures.is_empty() {
+            println!("No fixtures found for the specified round.");
+            return Ok(());
+        }
+
+        // Open database
+        let db = Database::open(&config.data.database_path)?;
+
+        // Load MLP model (2 outputs: win_logit and margin)
+        let device: <MyBackend as burn::tensor::backend::Backend>::Device = Default::default();
+        use burn::module::Module;
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let model: Linear<MyBackend> = LinearConfig::new(15, 2)
+            .init(&device)
+            .load_file(&model_path, &recorder, &device)
+            .map_err(|e| rugby::RugbyError::Config(format!("Failed to load model: {}", e)))?;
+
+        // Load normalization (now includes score_mean and score_std)
+        #[derive(serde::Deserialize)]
+        struct NormParams {
+            feature_mean: Vec<f32>,
+            feature_std: Vec<f32>,
+            score_mean: f32,
+            score_std: f32,
+        }
+        let norm_json = std::fs::read_to_string(&norm_file)?;
+        let norm_params: NormParams = serde_json::from_str(&norm_json)
+            .map_err(|e| rugby::RugbyError::Config(format!("Failed to load normalization: {}", e)))?;
+        let feature_norm = ComparisonNormalization {
+            mean: norm_params.feature_mean,
+            std: norm_params.feature_std,
+        };
+        let score_std = norm_params.score_std;
+
+        // Helper to compute team summary from match history
+        let compute_summary = |history: &[rugby::MatchRecord], team: rugby::TeamId| -> TeamSummary {
+            let window = 10;
+            let recent: Vec<_> = history.iter().rev().take(window).collect();
+
+            if recent.len() < 3 {
+                return TeamSummary::default();
+            }
+
+            let mut wins = 0.0f32;
+            let mut total_pf = 0.0f32;
+            let mut total_pa = 0.0f32;
+            let mut margins = Vec::new();
+
+            for m in &recent {
+                let is_home = m.home_team == team;
+                let (pf, pa) = if is_home {
+                    (m.home_score as f32, m.away_score as f32)
+                } else {
+                    (m.away_score as f32, m.home_score as f32)
+                };
+
+                let margin = pf - pa;
+                margins.push(margin);
+                total_pf += pf;
+                total_pa += pa;
+
+                if margin > 0.0 {
+                    wins += 1.0;
+                } else if margin == 0.0 {
+                    wins += 0.5;
+                }
+            }
+
+            let n = recent.len() as f32;
+            let win_rate = wins / n;
+            let margin_avg = margins.iter().sum::<f32>() / n;
+            let pf_avg = total_pf / n;
+            let pa_avg = total_pa / n;
+
+            let exp = 2.37f32;
+            let pf_pow = total_pf.powf(exp);
+            let pa_pow = total_pa.powf(exp);
+            let pythagorean = if pf_pow + pa_pow > 0.0 {
+                pf_pow / (pf_pow + pa_pow)
+            } else {
+                0.5
+            };
+
+            TeamSummary {
+                win_rate,
+                margin_avg,
+                pythagorean,
+                pf_avg,
+                pa_avg,
+            }
+        };
+
+        // Make predictions
+        struct SimplePrediction {
+            home_win_prob: f32,
+            margin: f32,
+        }
+
+        let mut predictions: Vec<(_, SimplePrediction)> = Vec::new();
+        for f in &fixtures {
+            // Look up teams
+            let home_team = match db.find_team_by_name(&f.home_team.name)? {
+                Some(t) => t,
+                None => {
+                    eprintln!("Warning: Unknown team {}", f.home_team.name);
+                    continue;
+                }
+            };
+            let away_team = match db.find_team_by_name(&f.away_team.name)? {
+                Some(t) => t,
+                None => {
+                    eprintln!("Warning: Unknown team {}", f.away_team.name);
+                    continue;
+                }
+            };
+
+            // Get match history
+            let home_history = db.get_recent_team_matches(home_team.id, 16)?;
+            let away_history = db.get_recent_team_matches(away_team.id, 16)?;
+
+            if home_history.len() < 3 || away_history.len() < 3 {
+                eprintln!("Warning: Insufficient history for {} vs {}",
+                    f.home_team.name, f.away_team.name);
+                continue;
+            }
+
+            // Compute summaries and comparison
+            let home_summary = compute_summary(&home_history, home_team.id);
+            let away_summary = compute_summary(&away_history, away_team.id);
+            let is_local = home_team.country == away_team.country;
+            let comparison = MatchComparison::from_summaries(&home_summary, &away_summary, is_local);
+
+            // Create tensor and predict
+            let comparison_tensor = Tensor::<MyBackend, 1>::from_floats(
+                comparison.to_vec().as_slice(),
+                &device,
+            ).reshape([1, 15]);
+
+            let normalized = feature_norm.normalize(comparison_tensor);
+            let output = model.forward(normalized);
+
+            // Split output: column 0 is win_logit, column 1 is margin (normalized)
+            let output_data = output.into_data();
+            let output_slice: &[f32] = output_data.as_slice().unwrap();
+            let win_logit = output_slice[0];
+            let margin_normalized = output_slice[1];
+
+            // Denormalize margin
+            let margin = margin_normalized * score_std;
+
+            // Compute win probability from logit
+            let home_win_prob = 1.0 / (1.0 + (-win_logit).exp());
+
+            predictions.push((f, SimplePrediction { home_win_prob, margin }));
+        }
+
+        if predictions.is_empty() {
+            println!("Could not make any predictions (teams may lack sufficient history).");
+            return Ok(());
+        }
+
+        // Output results
+        match format {
+            OutputFormat::Table => {
+                println!("┌────────────────────────────────────────────────────────────────────────┐");
+                println!("│  {} Super Rugby Pacific - Round {} Predictions                     │",
+                    year, fixtures.first().and_then(|f| f.round).unwrap_or(1));
+                println!("├────────────────────────────────────────────────────────────────────────┤");
+
+                for (fixture, pred) in &predictions {
+                    let winner = if pred.home_win_prob >= 0.5 {
+                        &fixture.home_team.name
+                    } else {
+                        &fixture.away_team.name
+                    };
+                    let win_prob = if pred.home_win_prob >= 0.5 {
+                        pred.home_win_prob
+                    } else {
+                        1.0 - pred.home_win_prob
+                    };
+                    let margin_abs = pred.margin.abs();
+
+                    println!("│  {}                                                        │", fixture.date);
+                    println!("│  {:15} vs {:15}                           │",
+                        fixture.home_team.name, fixture.away_team.name);
+                    println!("│  {} by {:.0} pts ({:.1}%)                                    │",
+                        winner, margin_abs, win_prob * 100.0);
+                    println!("├────────────────────────────────────────────────────────────────────────┤");
+                }
+                println!("└────────────────────────────────────────────────────────────────────────┘");
+            }
+            OutputFormat::Json => {
+                let json_preds: Vec<_> = predictions.iter().map(|(f, pred)| {
+                    serde_json::json!({
+                        "date": f.date.to_string(),
+                        "round": f.round,
+                        "home": f.home_team.name,
+                        "away": f.away_team.name,
+                        "home_win_prob": pred.home_win_prob,
+                        "predicted_margin": pred.margin.round() as i32,
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&json_preds).unwrap());
+            }
+            OutputFormat::Csv => {
+                println!("date,round,home,away,home_win_prob,margin");
+                for (f, pred) in &predictions {
+                    println!(
+                        "{},{},{},{},{:.3},{:.0}",
+                        f.date,
+                        f.round.map(|r| r.to_string()).unwrap_or_default(),
+                        f.home_team.name,
+                        f.away_team.name,
+                        pred.home_win_prob,
+                        pred.margin,
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn train(config: &Config, epochs: Option<usize>, lr: f64, optimizer: &str, init: &str) -> Result<()> {
+        use burn::backend::{Autodiff, NdArray};
+        use chrono::NaiveDate;
+        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
+        use rugby::training::{SimpleMLPTrainer, OptimizerType, InitMethod};
+
+        type MyBackend = NdArray<f32>;
+        type MyAutodiffBackend = Autodiff<MyBackend>;
+
+        let epochs = epochs.unwrap_or(200);
+
+        // Parse optimizer type
+        let optimizer_type = match optimizer.to_lowercase().as_str() {
+            "sgd" => OptimizerType::Sgd,
+            "adam" => OptimizerType::Adam,
+            _ => {
+                println!("Unknown optimizer '{}', using Adam", optimizer);
+                OptimizerType::Adam
+            }
+        };
+
+        // Parse init method
+        let init_method = match init.to_lowercase().as_str() {
+            "default" => InitMethod::Default,
+            "small" => InitMethod::Small,
+            "zero" => InitMethod::Zero,
+            _ => {
+                println!("Unknown init method '{}', using default", init);
+                InitMethod::Default
+            }
+        };
+
+        println!("Initializing multi-task MLP training...");
+        println!("  Optimizer: {:?}", optimizer_type);
+        println!("  Init method: {:?}", init_method);
 
         // Open database
         let db = Database::open(&config.data.database_path)?;
@@ -384,7 +695,6 @@ mod commands {
         println!("Loaded {} matches from database", stats.match_count);
 
         // Create datasets with time-based split
-        // Train: all data before 2023, Val: 2023, Test: 2024+
         let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
         let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
@@ -397,16 +707,11 @@ mod commands {
         let train_dataset =
             RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
         println!("  {} training samples", train_dataset.len());
-        println!(
-            "  Score normalization: mean={:.1}, std={:.1}",
-            train_dataset.score_norm.mean, train_dataset.score_norm.std
-        );
 
         println!(
             "Creating validation dataset ({} to {})...",
             train_cutoff, val_end
         );
-        // Use same normalization as training set
         let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
             &db,
             train_cutoff,
@@ -423,103 +728,213 @@ mod commands {
             ));
         }
 
-        // Initialize device and model
-        let device = burn::backend::wgpu::WgpuDevice::default();
-        let model_config =
-            RugbyNetConfig::from_model_config(&config.model, &training_config.training);
+        // Store score_norm for saving
+        let score_norm = train_dataset.score_norm;
 
-        println!("Creating model...");
-        let model = RugbyNet::<MyAutodiffBackend>::new(&device, model_config);
-
-        // Create trainer and train
-        let trainer = Trainer::new(model, training_config.clone(), device);
-
-        println!("\nStarting training...\n");
-        let (trained_model, history) = trainer.train(train_dataset, val_dataset)?;
-
-        // Save model
-        println!("\nSaving model to {}...", config.data.model_path);
-        trained_model.save(&config.data.model_path)?;
-
-        println!("\nTraining complete!");
-        println!("  Best epoch:     {}", history.best_epoch + 1);
-        println!("  Best val loss:  {:.4}", history.best_val_loss);
-        println!(
-            "  Final accuracy: {:.1}%",
-            history.val_accuracies.last().unwrap_or(&0.0) * 100.0
+        // Create trainer
+        let device: <MyBackend as burn::tensor::backend::Backend>::Device = Default::default();
+        let trainer = SimpleMLPTrainer::<MyAutodiffBackend>::new(
+            device.clone(), lr, optimizer_type, init_method
         );
+
+        println!("Learning rate: {}", lr);
+        println!("\nStarting MLP training...\n");
+
+        let (history, trained_model, feature_norm, margin_mae) =
+            trainer.train(train_dataset, val_dataset, epochs)?;
+
+        println!("\nMulti-task MLP Training complete!");
+        println!("  Margin MAE: {:.1} points", margin_mae);
+
+        // Save the model and normalization
+        let model_path = format!("{}_mlp", config.data.model_path);
+        println!("\nSaving model to {}...", model_path);
+
+        use burn::module::Module;
+        use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        trained_model
+            .clone()
+            .save_file(&model_path, &recorder)
+            .map_err(|e| rugby::RugbyError::Io(std::io::Error::other(format!("Failed to save model: {}", e))))?;
+
+        // Save normalization parameters (feature norm + score norm for margin)
+        #[derive(serde::Serialize)]
+        struct NormParams {
+            feature_mean: Vec<f32>,
+            feature_std: Vec<f32>,
+            score_mean: f32,
+            score_std: f32,
+        }
+        let norm_params = NormParams {
+            feature_mean: feature_norm.mean.clone(),
+            feature_std: feature_norm.std.clone(),
+            score_mean: score_norm.mean,
+            score_std: score_norm.std,
+        };
+        let norm_path = format!("{}_norm.json", model_path);
+        let norm_json = serde_json::to_string_pretty(&norm_params)
+            .map_err(|e| rugby::RugbyError::Config(format!("Failed to serialize normalization: {}", e)))?;
+        std::fs::write(&norm_path, norm_json)?;
+
+        println!("Model saved to {}.mpk", model_path);
+        println!("Normalization saved to {}", norm_path);
 
         Ok(())
     }
 
-    pub fn predict(
-        config: &Config,
-        home: Option<String>,
-        away: Option<String>,
-        _round: Option<u8>,
-        _fixture: Option<String>,
-        format: OutputFormat,
-    ) -> Result<()> {
-        use burn::backend::Wgpu;
-        use rugby::model::rugby_net::{RugbyNet, RugbyNetConfig};
-        use rugby::predict::inference::{format_prediction, Predictor};
+    pub fn predict(config: &Config, home: &str, away: &str) -> Result<()> {
+        use burn::backend::NdArray;
+        use burn::nn::{Linear, LinearConfig};
+        use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+        use burn::tensor::activation::sigmoid;
+        use burn::tensor::Tensor;
+        use rugby::data::dataset::{MatchComparison, TeamSummary};
+        use rugby::training::mlp_trainer::ComparisonNormalization;
 
-        type MyBackend = Wgpu<f32, i32>;
+        type MyBackend = NdArray<f32>;
 
-        // Check for model (Burn adds .mpk extension)
-        let model_file = format!("{}.mpk", config.data.model_path);
+        // Check for MLP model
+        let model_path = format!("{}_mlp", config.data.model_path);
+        let model_file = format!("{}.mpk", model_path);
+        let norm_file = format!("{}_norm.json", model_path);
+
         if !std::path::Path::new(&model_file).exists() {
+            println!("Model not found at {}", model_file);
+            println!("Train it with: rugby train --epochs 200 --lr 0.1");
             return Err(rugby::RugbyError::NoModel);
         }
 
         // Open database
         let db = Database::open(&config.data.database_path)?;
 
-        // Load model
-        let device = burn::backend::wgpu::WgpuDevice::default();
-        let model_config = RugbyNetConfig::from_model_config(&config.model, &config.training);
-        let model =
-            RugbyNet::<MyBackend>::load(&device, &config.data.model_path, model_config.clone())?;
+        // Load model (2 outputs: win_logit and margin)
+        let device: <MyBackend as burn::tensor::backend::Backend>::Device = Default::default();
+        use burn::module::Module;
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let model: Linear<MyBackend> = LinearConfig::new(15, 2)
+            .init(&device)
+            .load_file(&model_path, &recorder, &device)
+            .map_err(|e| rugby::RugbyError::Config(format!("Failed to load model: {}", e)))?;
 
-        let predictor = Predictor::new(model, db, device);
-
-        // Single match prediction
-        if let (Some(home_team), Some(away_team)) = (home, away) {
-            let prediction = predictor.predict(&home_team, &away_team)?;
-
-            match format {
-                OutputFormat::Table => {
-                    print!("{}", format_prediction(&prediction, &home_team, &away_team));
-                }
-                OutputFormat::Json => {
-                    let json = serde_json::json!({
-                        "home": home_team,
-                        "away": away_team,
-                        "home_win_prob": prediction.home_win_prob,
-                        "home_score": prediction.predicted_home_score,
-                        "away_score": prediction.predicted_away_score,
-                        "confidence": format!("{}", prediction.confidence),
-                    });
-                    println!("{}", serde_json::to_string_pretty(&json).unwrap());
-                }
-                OutputFormat::Csv => {
-                    println!("home,away,home_win_prob,home_score,away_score,confidence");
-                    println!(
-                        "{},{},{:.3},{:.0},{:.0},{}",
-                        home_team,
-                        away_team,
-                        prediction.home_win_prob,
-                        prediction.predicted_home_score,
-                        prediction.predicted_away_score,
-                        prediction.confidence
-                    );
-                }
-            }
-        } else {
-            println!("Usage: rugby predict <HOME_TEAM> <AWAY_TEAM>");
-            println!("\nExample:");
-            println!("  rugby predict \"Crusaders\" \"Blues\"");
+        // Load normalization (now includes score_mean and score_std)
+        #[derive(serde::Deserialize)]
+        struct NormParams {
+            feature_mean: Vec<f32>,
+            feature_std: Vec<f32>,
+            score_mean: f32,
+            score_std: f32,
         }
+        let norm_json = std::fs::read_to_string(&norm_file)?;
+        let norm_params: NormParams = serde_json::from_str(&norm_json)
+            .map_err(|e| rugby::RugbyError::Config(format!("Failed to load normalization: {}", e)))?;
+        let feature_norm = ComparisonNormalization {
+            mean: norm_params.feature_mean,
+            std: norm_params.feature_std,
+        };
+        let score_std = norm_params.score_std;
+
+        // Look up teams
+        let home_team = db.find_team_by_name(home)?
+            .ok_or_else(|| rugby::RugbyError::UnknownTeam(home.to_string()))?;
+        let away_team = db.find_team_by_name(away)?
+            .ok_or_else(|| rugby::RugbyError::UnknownTeam(away.to_string()))?;
+
+        // Get match history
+        let home_history = db.get_recent_team_matches(home_team.id, 16)?;
+        let away_history = db.get_recent_team_matches(away_team.id, 16)?;
+
+        if home_history.len() < 3 {
+            return Err(rugby::RugbyError::InsufficientHistory {
+                team: home.to_string(),
+                matches: home_history.len(),
+                required: 3,
+            });
+        }
+        if away_history.len() < 3 {
+            return Err(rugby::RugbyError::InsufficientHistory {
+                team: away.to_string(),
+                matches: away_history.len(),
+                required: 3,
+            });
+        }
+
+        // Compute team summaries
+        let compute_summary = |history: &[rugby::MatchRecord], team: rugby::TeamId| -> TeamSummary {
+            let window = 10;
+            let recent: Vec<_> = history.iter().rev().take(window).collect();
+            if recent.len() < 3 { return TeamSummary::default(); }
+
+            let mut wins = 0.0f32;
+            let mut total_pf = 0.0f32;
+            let mut total_pa = 0.0f32;
+            let mut margins = Vec::new();
+
+            for m in &recent {
+                let is_home = m.home_team == team;
+                let (pf, pa) = if is_home {
+                    (m.home_score as f32, m.away_score as f32)
+                } else {
+                    (m.away_score as f32, m.home_score as f32)
+                };
+                let margin = pf - pa;
+                margins.push(margin);
+                total_pf += pf;
+                total_pa += pa;
+                if margin > 0.0 { wins += 1.0; }
+                else if margin == 0.0 { wins += 0.5; }
+            }
+
+            let n = recent.len() as f32;
+            let exp = 2.37f32;
+            let pf_pow = total_pf.powf(exp);
+            let pa_pow = total_pa.powf(exp);
+
+            TeamSummary {
+                win_rate: wins / n,
+                margin_avg: margins.iter().sum::<f32>() / n,
+                pythagorean: if pf_pow + pa_pow > 0.0 { pf_pow / (pf_pow + pa_pow) } else { 0.5 },
+                pf_avg: total_pf / n,
+                pa_avg: total_pa / n,
+            }
+        };
+
+        let home_summary = compute_summary(&home_history, home_team.id);
+        let away_summary = compute_summary(&away_history, away_team.id);
+        let is_local = home_team.country == away_team.country;
+        let comparison = MatchComparison::from_summaries(&home_summary, &away_summary, is_local);
+
+        // Predict
+        let comparison_tensor = Tensor::<MyBackend, 1>::from_floats(
+            comparison.to_vec().as_slice(),
+            &device,
+        ).reshape([1, 15]);
+
+        let normalized = feature_norm.normalize(comparison_tensor);
+        let output = model.forward(normalized);
+
+        // Split output: column 0 is win_logit, column 1 is margin (normalized)
+        let output_data = output.into_data();
+        let output_slice: &[f32] = output_data.as_slice().unwrap();
+        let win_logit = output_slice[0];
+        let margin_normalized = output_slice[1];
+
+        // Denormalize margin
+        let margin = margin_normalized * score_std;
+
+        // Compute win probability from logit
+        let home_win_prob = 1.0 / (1.0 + (-win_logit).exp());
+
+        // Display result
+        let winner = if home_win_prob >= 0.5 { home } else { away };
+        let win_prob = if home_win_prob >= 0.5 { home_win_prob } else { 1.0 - home_win_prob };
+        let margin_abs = margin.abs();
+
+        println!("\n┌─────────────────────────────────────────────────┐");
+        println!("│  {} vs {}", home, away);
+        println!("├─────────────────────────────────────────────────┤");
+        println!("│  {} by {:.0} pts ({:.1}%)", winner, margin_abs, win_prob * 100.0);
+        println!("└─────────────────────────────────────────────────┘\n");
 
         Ok(())
     }
@@ -558,80 +973,6 @@ mod commands {
     pub fn model_validate(_config: &Config) -> Result<()> {
         println!("Validation not yet implemented");
         println!("Run 'rugby train' to see validation metrics");
-        Ok(())
-    }
-
-    pub fn train_mlp(config: &Config, epochs: Option<usize>, lr: f64) -> Result<()> {
-        use burn::backend::{Autodiff, NdArray};
-        use chrono::NaiveDate;
-        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
-        use rugby::training::SimpleMLPTrainer;
-
-        // Use NdArray backend (same as debug_training.rs)
-        type MyBackend = NdArray<f32>;
-        type MyAutodiffBackend = Autodiff<MyBackend>;
-
-        let epochs = epochs.unwrap_or(100);
-
-        println!("Initializing Simple MLP training...");
-
-        // Open database
-        let db = Database::open(&config.data.database_path)?;
-        let stats = db.get_stats()?;
-
-        if stats.match_count == 0 {
-            return Err(rugby::RugbyError::Config(
-                "No matches in database. Run 'rugby data sync' first.".to_string(),
-            ));
-        }
-
-        println!("Loaded {} matches from database", stats.match_count);
-
-        // Create datasets with time-based split
-        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-
-        let dataset_config = DatasetConfig {
-            max_history: config.model.max_history,
-            min_history: 3,
-        };
-
-        println!("Creating training dataset (before {})...", train_cutoff);
-        let train_dataset =
-            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
-        println!("  {} training samples", train_dataset.len());
-
-        println!(
-            "Creating validation dataset ({} to {})...",
-            train_cutoff, val_end
-        );
-        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
-            &db,
-            train_cutoff,
-            val_end,
-            dataset_config,
-            train_dataset.score_norm,
-            *train_dataset.feature_norm(),
-        )?;
-        println!("  {} validation samples", val_dataset.len());
-
-        if train_dataset.is_empty() || val_dataset.is_empty() {
-            return Err(rugby::RugbyError::Config(
-                "Not enough data for training. Need matches before and after 2023.".to_string(),
-            ));
-        }
-
-        // Create simple trainer (single Linear layer, like debug_training.rs)
-        let device = Default::default();
-        let trainer = SimpleMLPTrainer::<MyAutodiffBackend>::new(device, lr);
-
-        println!("Learning rate: {}", lr);
-        println!("\nStarting Simple MLP training...\n");
-
-        let _history = trainer.train(train_dataset, val_dataset, epochs)?;
-
-        println!("\nSimple MLP Training complete!");
-
         Ok(())
     }
 
@@ -723,112 +1064,6 @@ mod commands {
         let history = trainer.train(train_dataset, val_dataset, epochs)?;
 
         println!("\nLSTM Training complete!");
-        println!("  Best epoch: {}", history.best_epoch + 1);
-        println!(
-            "  Best val accuracy: {:.1}%",
-            history.val_accuracies.last().unwrap_or(&0.0) * 100.0
-        );
-
-        Ok(())
-    }
-
-    pub fn train_transformer(
-        config: &Config,
-        epochs: Option<usize>,
-        lr: f64,
-        d_model: usize,
-        batch_size: usize,
-    ) -> Result<()> {
-        use burn::backend::{Autodiff, NdArray};
-        use chrono::NaiveDate;
-        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
-        use rugby::model::rugby_net::RugbyNetConfig;
-        use rugby::training::TransformerTrainer;
-
-        type MyBackend = NdArray<f32>;
-        type MyAutodiffBackend = Autodiff<MyBackend>;
-
-        let epochs = epochs.unwrap_or(50);
-
-        println!("Initializing Transformer training...");
-
-        // Open database
-        let db = Database::open(&config.data.database_path)?;
-        let stats = db.get_stats()?;
-
-        if stats.match_count == 0 {
-            return Err(rugby::RugbyError::Config(
-                "No matches in database. Run 'rugby data sync' first.".to_string(),
-            ));
-        }
-
-        println!("Loaded {} matches from database", stats.match_count);
-
-        // Create datasets
-        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-
-        let dataset_config = DatasetConfig {
-            max_history: config.model.max_history,
-            min_history: 3,
-        };
-
-        println!("Creating training dataset (before {})...", train_cutoff);
-        let train_dataset =
-            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
-        println!("  {} training samples", train_dataset.len());
-
-        println!(
-            "Creating validation dataset ({} to {})...",
-            train_cutoff, val_end
-        );
-        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
-            &db,
-            train_cutoff,
-            val_end,
-            dataset_config,
-            train_dataset.score_norm,
-            *train_dataset.feature_norm(),
-        )?;
-        println!("  {} validation samples", val_dataset.len());
-
-        if train_dataset.is_empty() || val_dataset.is_empty() {
-            return Err(rugby::RugbyError::Config(
-                "Not enough data for training. Need matches before and after 2023.".to_string(),
-            ));
-        }
-
-        // Create Transformer config
-        let transformer_config = RugbyNetConfig {
-            input_dim: 15,
-            d_model,
-            n_heads: d_model / 16, // Ensure divisible
-            n_encoder_layers: 2,
-            n_cross_attn_layers: 1,
-            d_ff: d_model * 4,
-            head_hidden_dim: d_model / 2,
-            dropout: 0.1,
-            max_seq_len: config.model.max_history,
-            n_teams: 64,
-            team_embed_dim: 16,
-        };
-
-        println!("Transformer config:");
-        println!("  d_model: {}", transformer_config.d_model);
-        println!("  n_heads: {}", transformer_config.n_heads);
-        println!("  n_encoder_layers: {}", transformer_config.n_encoder_layers);
-        println!("  Learning rate: {}", lr);
-        println!("  Batch size: {}", batch_size);
-
-        // Create trainer
-        let device = Default::default();
-        let trainer = TransformerTrainer::<MyAutodiffBackend>::new(device, transformer_config, lr);
-
-        println!("\nStarting Transformer training...\n");
-
-        let history = trainer.train(train_dataset, val_dataset, epochs, batch_size)?;
-
-        println!("\nTransformer Training complete!");
         println!("  Best epoch: {}", history.best_epoch + 1);
         println!(
             "  Best val accuracy: {:.1}%",
@@ -975,10 +1210,10 @@ mod commands {
     pub fn tune_lstm(config: &Config, max_epochs: usize) -> Result<()> {
         use burn::backend::{Autodiff, NdArray};
         use burn::data::dataloader::DataLoaderBuilder;
-        use burn::nn::Linear;
+        
         use burn::optim::{GradientsParams, Optimizer, SgdConfig};
         use burn::tensor::activation::sigmoid;
-        use burn::tensor::ElementConversion;
+        
         use chrono::NaiveDate;
         use rugby::data::dataset::{DatasetConfig, MatchBatcher, RugbyDataset};
         use rugby::model::lstm::{LSTMConfig, LSTMModel};
@@ -1251,322 +1486,6 @@ mod commands {
         println!("\nBest configuration:");
         println!("  Learning rate: {}", best.lr);
         println!("  Hidden size: {}", best.hidden_size);
-        println!("  Epochs: {}", best.epochs);
-        println!("  Validation accuracy: {:.1}%", best.val_acc * 100.0);
-        println!("  Test accuracy: {:.1}%", best.test_acc * 100.0);
-
-        Ok(())
-    }
-
-    pub fn tune_transformer(config: &Config, max_epochs: usize) -> Result<()> {
-        use burn::backend::ndarray::NdArray;
-        use burn::backend::Autodiff;
-        use burn::data::dataloader::DataLoaderBuilder;
-        use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-        use burn::tensor::activation::sigmoid;
-        use chrono::NaiveDate;
-        use rugby::data::dataset::{DatasetConfig, MatchBatcher, RugbyDataset};
-        use rugby::model::rugby_net::{RugbyNet, RugbyNetConfig};
-        use rugby::training::mlp_trainer::ComparisonNormalization;
-
-        type MyBackend = NdArray<f32>;
-        type MyAutodiffBackend = Autodiff<MyBackend>;
-
-        println!("Initializing Transformer hyperparameter tuning (time-based splits)...");
-
-        // Open database
-        let db = Database::open(&config.data.database_path)?;
-        let stats = db.get_stats()?;
-
-        if stats.match_count == 0 {
-            return Err(rugby::RugbyError::Config(
-                "No matches in database. Run 'rugby data sync' first.".to_string(),
-            ));
-        }
-
-        println!("Loaded {} matches from database", stats.match_count);
-
-        // Time-based splits
-        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let test_end = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-
-        let dataset_config = DatasetConfig {
-            max_history: config.model.max_history,
-            min_history: 3,
-        };
-
-        println!("Creating training dataset (before {})...", train_cutoff);
-        let train_dataset =
-            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
-        println!("  {} training samples", train_dataset.len());
-
-        println!(
-            "Creating validation dataset ({} to {})...",
-            train_cutoff, val_end
-        );
-        let val_dataset = RugbyDataset::from_matches_in_range_with_norm(
-            &db,
-            train_cutoff,
-            val_end,
-            dataset_config.clone(),
-            train_dataset.score_norm,
-            *train_dataset.feature_norm(),
-        )?;
-        println!("  {} validation samples", val_dataset.len());
-
-        println!(
-            "Creating test dataset ({} to {})...",
-            val_end, test_end
-        );
-        let test_dataset = RugbyDataset::from_matches_in_range_with_norm(
-            &db,
-            val_end,
-            test_end,
-            dataset_config,
-            train_dataset.score_norm,
-            *train_dataset.feature_norm(),
-        )?;
-        println!("  {} test samples", test_dataset.len());
-
-        if train_dataset.is_empty() || val_dataset.is_empty() {
-            return Err(rugby::RugbyError::Config(
-                "Not enough data for training. Need matches before and after 2023.".to_string(),
-            ));
-        }
-
-        // Compute feature normalization
-        let feature_norm = ComparisonNormalization::from_dataset(&train_dataset);
-
-        // Define hyperparameter search space: (learning_rate, d_model, batch_size, epochs)
-        let hyperparams: Vec<(f64, usize, usize, usize)> = vec![
-            // Different learning rates
-            (0.0001, 64, 32, 50),
-            (0.0005, 64, 32, 50),
-            (0.001, 64, 32, 50),
-            (0.002, 64, 32, 50),
-            // Different model sizes
-            (0.001, 32, 32, 50),
-            (0.001, 128, 32, 50),
-            // Different batch sizes
-            (0.001, 64, 64, 50),
-            (0.001, 64, 128, 50),
-            // More epochs for promising configs
-            (0.001, 64, 32, max_epochs),
-        ];
-
-        println!("\nTesting {} hyperparameter configurations...\n", hyperparams.len());
-
-        // Results storage
-        struct TransformerResult {
-            lr: f64,
-            d_model: usize,
-            batch_size: usize,
-            epochs: usize,
-            train_acc: f32,
-            val_acc: f32,
-            test_acc: f32,
-        }
-        let mut results: Vec<TransformerResult> = Vec::new();
-
-        let device = Default::default();
-        println!("Using CPU (NdArray) backend");
-
-        for (lr, d_model, batch_size, epochs) in &hyperparams {
-            println!("Testing lr={}, d_model={}, batch_size={}, epochs={}", lr, d_model, batch_size, epochs);
-
-            // Create model config
-            let transformer_config = RugbyNetConfig {
-                input_dim: 15,
-                d_model: *d_model,
-                n_heads: (*d_model / 16).max(2),
-                n_encoder_layers: 2,
-                n_cross_attn_layers: 1,
-                d_ff: *d_model * 4,
-                head_hidden_dim: *d_model / 2,
-                dropout: 0.1,
-                max_seq_len: config.model.max_history,
-                n_teams: 64,
-                team_embed_dim: 16,
-            };
-
-            let mut model = RugbyNet::<MyAutodiffBackend>::new(&device, transformer_config);
-            let mut optimizer = AdamConfig::new().init();
-
-            // Create data loaders
-            let batcher = MatchBatcher::<MyAutodiffBackend>::new(device.clone());
-            let train_loader = DataLoaderBuilder::new(batcher.clone())
-                .batch_size(*batch_size)
-                .shuffle(42)
-                .build(train_dataset.clone());
-            let val_loader = DataLoaderBuilder::new(batcher.clone())
-                .batch_size(val_dataset.len())
-                .build(val_dataset.clone());
-            let test_loader = DataLoaderBuilder::new(batcher)
-                .batch_size(test_dataset.len())
-                .build(test_dataset.clone());
-
-            let mut best_val_acc = 0.0f32;
-            let mut best_model = model.clone();
-
-            // Training loop
-            for _epoch in 0..*epochs {
-                for train_batch in train_loader.iter() {
-                    let comparison = feature_norm.normalize(train_batch.comparison.clone());
-                    let y_train = train_batch.home_win.clone().unsqueeze_dim(1);
-
-                    // Forward
-                    let predictions = model.forward(
-                        train_batch.home_history.clone(),
-                        train_batch.away_history.clone(),
-                        Some(train_batch.home_mask.clone()),
-                        Some(train_batch.away_mask.clone()),
-                        Some(train_batch.home_team_id.clone()),
-                        Some(train_batch.away_team_id.clone()),
-                        Some(comparison),
-                    );
-                    let probs = sigmoid(predictions.win_logit.clone());
-
-                    // Loss (BCE)
-                    let eps = 1e-7;
-                    let probs_clamped = probs.clamp(eps, 1.0 - eps);
-                    let loss = y_train.clone().neg() * probs_clamped.clone().log()
-                        - (y_train.clone().neg() + 1.0) * (probs_clamped.neg() + 1.0).log();
-                    let loss = loss.mean();
-
-                    // Backward
-                    let grads = loss.backward();
-                    let grads_params = GradientsParams::from_grads(grads, &model);
-                    model = optimizer.step(*lr, model, grads_params);
-                }
-
-                // Check validation every epoch
-                let val_batch = val_loader.iter().next().unwrap();
-                let val_comparison = feature_norm.normalize(val_batch.comparison.clone());
-                let val_preds = model.forward(
-                    val_batch.home_history.clone(),
-                    val_batch.away_history.clone(),
-                    Some(val_batch.home_mask.clone()),
-                    Some(val_batch.away_mask.clone()),
-                    Some(val_batch.home_team_id.clone()),
-                    Some(val_batch.away_team_id.clone()),
-                    Some(val_comparison),
-                );
-                let val_probs = sigmoid(val_preds.win_logit);
-                let val_probs_data = val_probs.clone().into_data();
-                let val_targets_data = val_batch.home_win.clone().into_data();
-                let val_probs_slice: &[f32] = val_probs_data.as_slice().unwrap();
-                let val_targets_slice: &[f32] = val_targets_data.as_slice().unwrap();
-                let val_correct = val_probs_slice
-                    .iter()
-                    .zip(val_targets_slice.iter())
-                    .filter(|(p, t)| (**p >= 0.5) == (**t >= 0.5))
-                    .count();
-                let val_acc = val_correct as f32 / val_probs_slice.len() as f32;
-
-                if val_acc > best_val_acc {
-                    best_val_acc = val_acc;
-                    best_model = model.clone();
-                }
-            }
-
-            // Evaluate best model on train and test
-            let train_batch = train_loader.iter().next().unwrap();
-            let comparison = feature_norm.normalize(train_batch.comparison.clone());
-            let train_preds = best_model.forward(
-                train_batch.home_history.clone(),
-                train_batch.away_history.clone(),
-                Some(train_batch.home_mask.clone()),
-                Some(train_batch.away_mask.clone()),
-                Some(train_batch.home_team_id.clone()),
-                Some(train_batch.away_team_id.clone()),
-                Some(comparison),
-            );
-            let train_probs = sigmoid(train_preds.win_logit);
-            let train_probs_data = train_probs.into_data();
-            let train_targets_data = train_batch.home_win.clone().into_data();
-            let train_probs_slice: &[f32] = train_probs_data.as_slice().unwrap();
-            let train_targets_slice: &[f32] = train_targets_data.as_slice().unwrap();
-            let train_correct = train_probs_slice
-                .iter()
-                .zip(train_targets_slice.iter())
-                .filter(|(p, t)| (**p >= 0.5) == (**t >= 0.5))
-                .count();
-            let train_acc = train_correct as f32 / train_probs_slice.len() as f32;
-
-            let test_batch = test_loader.iter().next().unwrap();
-            let test_comparison = feature_norm.normalize(test_batch.comparison.clone());
-            let test_preds = best_model.forward(
-                test_batch.home_history.clone(),
-                test_batch.away_history.clone(),
-                Some(test_batch.home_mask.clone()),
-                Some(test_batch.away_mask.clone()),
-                Some(test_batch.home_team_id.clone()),
-                Some(test_batch.away_team_id.clone()),
-                Some(test_comparison),
-            );
-            let test_probs = sigmoid(test_preds.win_logit);
-            let test_probs_data = test_probs.into_data();
-            let test_targets_data = test_batch.home_win.clone().into_data();
-            let test_probs_slice: &[f32] = test_probs_data.as_slice().unwrap();
-            let test_targets_slice: &[f32] = test_targets_data.as_slice().unwrap();
-            let test_correct = test_probs_slice
-                .iter()
-                .zip(test_targets_slice.iter())
-                .filter(|(p, t)| (**p >= 0.5) == (**t >= 0.5))
-                .count();
-            let test_acc = test_correct as f32 / test_probs_slice.len() as f32;
-
-            println!(
-                "  train_acc={:.1}%, val_acc={:.1}%, test_acc={:.1}%",
-                train_acc * 100.0,
-                best_val_acc * 100.0,
-                test_acc * 100.0
-            );
-
-            results.push(TransformerResult {
-                lr: *lr,
-                d_model: *d_model,
-                batch_size: *batch_size,
-                epochs: *epochs,
-                train_acc,
-                val_acc: best_val_acc,
-                test_acc,
-            });
-        }
-
-        // Find best result
-        let best = results
-            .iter()
-            .max_by(|a, b| a.val_acc.partial_cmp(&b.val_acc).unwrap())
-            .unwrap();
-
-        println!("\n=== Transformer Tuning Results (Time-Based Splits) ===\n");
-        println!(
-            "{:>8} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10}",
-            "LR", "d_model", "Batch", "Epochs", "Train%", "Val%", "Test%"
-        );
-        println!("{}", "-".repeat(72));
-
-        for r in &results {
-            let marker = if r.val_acc == best.val_acc { " *" } else { "" };
-            println!(
-                "{:>8.4} {:>8} {:>8} {:>8} {:>9.1}% {:>9.1}% {:>9.1}%{}",
-                r.lr,
-                r.d_model,
-                r.batch_size,
-                r.epochs,
-                r.train_acc * 100.0,
-                r.val_acc * 100.0,
-                r.test_acc * 100.0,
-                marker
-            );
-        }
-
-        println!("\nBest configuration:");
-        println!("  Learning rate: {}", best.lr);
-        println!("  d_model: {}", best.d_model);
-        println!("  Batch size: {}", best.batch_size);
         println!("  Epochs: {}", best.epochs);
         println!("  Validation accuracy: {:.1}%", best.val_acc * 100.0);
         println!("  Test accuracy: {:.1}%", best.test_acc * 100.0);

@@ -40,14 +40,14 @@ where
         }
     }
 
-    /// Train the model
+    /// Train the model and return both history and trained model
     pub fn train(
         mut self,
         train_dataset: RugbyDataset,
         val_dataset: RugbyDataset,
         epochs: usize,
         batch_size: usize,
-    ) -> Result<TrainingHistory> {
+    ) -> Result<(TrainingHistory, RugbyNet<B>)> {
         // Compute feature normalization for comparison features
         let feature_norm = ComparisonNormalization::from_dataset(&train_dataset);
         log::info!(
@@ -172,7 +172,7 @@ where
             }
         }
 
-        Ok(history)
+        Ok((history, self.model))
     }
 
     fn binary_cross_entropy(&self, probs: Tensor<B, 2>, targets: Tensor<B, 2>) -> Tensor<B, 1> {

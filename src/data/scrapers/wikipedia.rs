@@ -385,6 +385,143 @@ impl WikipediaScraper {
         Ok(all_matches)
     }
 
+    /// Fetch upcoming fixtures for a season (matches without scores yet)
+    pub fn fetch_fixtures(&self, year: u16) -> Result<Vec<RawFixture>> {
+        let url = format!(
+            "https://en.wikipedia.org/wiki/List_of_{}_Super_Rugby_Pacific_matches",
+            year
+        );
+
+        log::info!("Fetching {} fixtures from {}", year, url);
+
+        // Try cache first
+        let html = if let Some(cached) = self.load_from_cache(&url) {
+            cached
+        } else if self.offline_only {
+            return Err(RugbyError::Scraper {
+                data_source: DataSource::Wikipedia,
+                message: format!("No cached data for {} (offline mode)", url),
+            });
+        } else {
+            let response = self.client.get(&url).send()?;
+            if !response.status().is_success() {
+                return Err(RugbyError::Scraper {
+                    data_source: DataSource::Wikipedia,
+                    message: format!("HTTP {}: {}", response.status(), url),
+                });
+            }
+            let html = response.text()?;
+            let _ = self.save_to_cache(&url, &html);
+            html
+        };
+
+        self.parse_fixtures(&html)
+    }
+
+    /// Parse fixtures (upcoming matches without scores)
+    fn parse_fixtures(&self, html: &str) -> Result<Vec<RawFixture>> {
+        let document = Html::parse_document(html);
+        let mut fixtures = Vec::new();
+
+        // Select match event divs using Schema.org SportsEvent format
+        let event_selector =
+            Selector::parse("div[itemtype='http://schema.org/SportsEvent']").unwrap();
+        let team_selector = Selector::parse("span.fn.org").unwrap();
+        let td_selector = Selector::parse("td").unwrap();
+        let location_selector = Selector::parse("span.location").unwrap();
+
+        // Score pattern to detect if a match has been played
+        let score_pattern = Regex::new(r"(\d{1,3})\s*[–-]\s*(\d{1,3})").unwrap();
+
+        for event in document.select(&event_selector) {
+            // Get all text content for date extraction
+            let event_text: String = event.text().collect();
+
+            // Find date in the event
+            let date = self.extract_date_from_text(&event_text);
+
+            // Find teams (should be two span.fn.org elements)
+            let teams: Vec<_> = event.select(&team_selector).collect();
+            if teams.len() < 2 {
+                continue;
+            }
+
+            let home_text: String = teams[0].text().collect();
+            let away_text: String = teams[1].text().collect();
+
+            let home_team = self.normalize_team_name(home_text.trim());
+            let away_team = self.normalize_team_name(away_text.trim());
+
+            // Check if there's a score - if so, this match has been played
+            let mut has_score = false;
+            for td in event.select(&td_selector) {
+                let td_text: String = td.text().collect();
+                if score_pattern.is_match(&td_text) {
+                    has_score = true;
+                    break;
+                }
+            }
+
+            // Only include fixtures WITHOUT scores (upcoming matches)
+            if has_score {
+                continue;
+            }
+
+            // Extract venue
+            let venue = event
+                .select(&location_selector)
+                .next()
+                .map(|loc| loc.text().collect::<String>().trim().to_string());
+
+            if let (Some(date), Some(home), Some(away)) = (date, home_team, away_team) {
+                fixtures.push(RawFixture {
+                    date,
+                    home_team: home,
+                    away_team: away,
+                    venue,
+                    round: None, // Will be inferred from date
+                });
+            }
+        }
+
+        // Deduplicate
+        fixtures.sort_by(|a, b| (&a.date, &a.home_team.name).cmp(&(&b.date, &b.home_team.name)));
+        fixtures.dedup_by(|a, b| {
+            a.date == b.date && a.home_team.name == b.home_team.name && a.away_team.name == b.away_team.name
+        });
+
+        // Infer round numbers from dates (each round is typically one week)
+        if !fixtures.is_empty() {
+            // Get unique weeks and map them to rounds
+            let mut dates: Vec<NaiveDate> = fixtures.iter().map(|f| f.date).collect();
+            dates.sort();
+            dates.dedup();
+
+            // Group consecutive dates within 3 days as same round
+            let mut date_to_round: HashMap<NaiveDate, u8> = HashMap::new();
+            let mut current_round = 1u8;
+            let mut round_start_date = dates[0];
+
+            for date in &dates {
+                let days_since_round_start = (*date - round_start_date).num_days();
+                if days_since_round_start > 3 {
+                    // New round
+                    current_round += 1;
+                    round_start_date = *date;
+                }
+                date_to_round.insert(*date, current_round);
+            }
+
+            // Apply rounds to fixtures
+            for fixture in &mut fixtures {
+                fixture.round = date_to_round.get(&fixture.date).copied();
+            }
+        }
+
+        log::info!("Found {} upcoming fixtures", fixtures.len());
+        Ok(fixtures)
+    }
+
     /// Fetch and parse a Wikipedia page (uses cache if available)
     fn fetch_page(&self, url: &str) -> Result<Vec<RawMatch>> {
         // Try cache first
@@ -951,6 +1088,16 @@ pub struct RawMatch {
     pub away_score: u8,
     pub home_tries: Option<u8>,
     pub away_tries: Option<u8>,
+    pub round: Option<u8>,
+}
+
+/// Raw fixture data (upcoming match without scores)
+#[derive(Debug, Clone)]
+pub struct RawFixture {
+    pub date: NaiveDate,
+    pub home_team: TeamInfo,
+    pub away_team: TeamInfo,
+    pub venue: Option<String>,
     pub round: Option<u8>,
 }
 

@@ -14,6 +14,6 @@ pub use lstm_trainer::LSTMTrainer;
 pub use metrics::Metrics;
 pub use mlp_trainer::MLPTrainer;
 pub use mlp_tuning::{MLPHyperparams, MLPTuner, RandomSplitDatasets, SplitRatios, TuningResult};
-pub use simple_mlp::SimpleMLPTrainer;
+pub use simple_mlp::{SimpleMLPTrainer, OptimizerType, InitMethod};
 pub use trainer::Trainer;
 pub use transformer_trainer::TransformerTrainer;

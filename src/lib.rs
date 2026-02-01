@@ -117,6 +117,16 @@ pub struct MatchRecord {
     pub source: DataSource,
 }
 
+/// An upcoming match fixture (no scores yet)
+#[derive(Debug, Clone)]
+pub struct Fixture {
+    pub date: NaiveDate,
+    pub home_team: String,
+    pub away_team: String,
+    pub venue: Option<String>,
+    pub round: Option<u8>,
+}
+
 impl MatchRecord {
     /// Returns the winning team, or None for a draw
     pub fn winner(&self) -> Option<TeamId> {
