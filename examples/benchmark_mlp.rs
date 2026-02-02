@@ -1,7 +1,7 @@
 use burn::backend::{Autodiff, NdArray};
 use rugby::{Config, Result};
 use rugby::data::Database;
-use rugby::data::dataset::{RugbyDataset, DatasetConfig};
+use rugby::data::dataset::{RugbyDataset, DatasetConfig, MatchComparison};
 use rugby::model::mlp::{MLPModel, MLPConfig};
 use rugby::training::MLPTrainer;
 use chrono::NaiveDate;
@@ -136,7 +136,7 @@ fn main() -> Result<()>
 
     // 1. Benchmark Old Model (Linear)
     let old_config = MLPConfig {
-        input_dim: 15,
+        input_dim: MatchComparison::DIM,
         hidden_dim: 0, // Linear regression
         dropout: 0.0,
     };
@@ -144,7 +144,7 @@ fn main() -> Result<()>
 
     // 2. Benchmark Improved Model (MLP)
     let new_config = MLPConfig {
-        input_dim: 15,
+        input_dim: MatchComparison::DIM,
         hidden_dim: 64, // MLP
         dropout: 0.1, // Regularization
     };
