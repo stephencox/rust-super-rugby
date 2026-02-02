@@ -130,6 +130,7 @@ impl From<RawMatchWithVenue> for RawMatch {
             home_tries: None,
             away_tries: None,
             round: None,
+            venue: m.venue,
         }
     }
 }
