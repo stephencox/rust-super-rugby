@@ -44,6 +44,7 @@ impl fmt::Display for DataSource {
 /// Country code for team nationality
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Country {
+    // Super Rugby countries
     NewZealand,
     Australia,
     SouthAfrica,
@@ -52,11 +53,19 @@ pub enum Country {
     Fiji,
     Samoa,
     Tonga,
+    // Six Nations countries
+    England,
+    France,
+    Ireland,
+    Wales,
+    Scotland,
+    Italy,
 }
 
 impl Country {
     pub fn code(&self) -> &'static str {
         match self {
+            // Super Rugby
             Country::NewZealand => "NZ",
             Country::Australia => "AU",
             Country::SouthAfrica => "SA",
@@ -65,11 +74,19 @@ impl Country {
             Country::Fiji => "FJ",
             Country::Samoa => "WS",
             Country::Tonga => "TO",
+            // Six Nations
+            Country::England => "ENG",
+            Country::France => "FRA",
+            Country::Ireland => "IRE",
+            Country::Wales => "WAL",
+            Country::Scotland => "SCO",
+            Country::Italy => "ITA",
         }
     }
 
     pub fn from_code(code: &str) -> Option<Self> {
         match code.to_uppercase().as_str() {
+            // Super Rugby
             "NZ" => Some(Country::NewZealand),
             "AU" => Some(Country::Australia),
             "SA" | "ZA" => Some(Country::SouthAfrica),
@@ -78,6 +95,13 @@ impl Country {
             "FJ" => Some(Country::Fiji),
             "WS" => Some(Country::Samoa),
             "TO" => Some(Country::Tonga),
+            // Six Nations
+            "ENG" | "EN" | "GB" => Some(Country::England),
+            "FRA" | "FR" => Some(Country::France),
+            "IRE" | "IE" => Some(Country::Ireland),
+            "WAL" | "WL" => Some(Country::Wales),
+            "SCO" => Some(Country::Scotland),
+            "ITA" | "IT" => Some(Country::Italy),
             _ => None,
         }
     }
