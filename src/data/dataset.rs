@@ -328,6 +328,8 @@ pub struct RugbyDataset {
     pub score_norm: ScoreNormalization,
     /// Feature normalization parameters (for inputs)
     pub feature_norm: FeatureNormalization,
+    /// Mapping from raw Team ID (DB) to dense index (0..N) for embeddings
+    pub team_mapping: HashMap<i64, u32>,
 }
 
 impl RugbyDataset {
@@ -362,7 +364,7 @@ impl RugbyDataset {
         feature_norm: FeatureNormalization,
     ) -> Result<Self> {
         let matches = db.get_matches_in_range(start, end)?;
-        Self::from_matches_with_norm(db, matches, config, Some(score_norm), Some(feature_norm))
+        Self::from_matches_with_norm(db, matches, config, Some(score_norm), Some(feature_norm), None)
     }
 
     /// Create dataset from a list of matches
@@ -371,21 +373,40 @@ impl RugbyDataset {
         matches: Vec<MatchRecord>,
         config: DatasetConfig,
     ) -> Result<Self> {
-        Self::from_matches_with_norm(db, matches, config, None, None)
+        Self::from_matches_with_norm(db, matches, config, None, None, None)
     }
 
-    /// Create dataset with explicit normalization params (for validation/test using train stats)
+    /// Create dataset with explicit normalization params and optional mapping
     pub fn from_matches_with_norm(
         db: &Database,
         matches: Vec<MatchRecord>,
         config: DatasetConfig,
         score_norm: Option<ScoreNormalization>,
         feature_norm: Option<FeatureNormalization>,
+        existing_mapping: Option<&HashMap<i64, u32>>,
     ) -> Result<Self> {
         // Compute normalization from all matches if not provided
         let all_matches = db.get_all_matches()?;
         let score_norm = score_norm.unwrap_or_else(|| ScoreNormalization::from_matches(&all_matches));
         let feature_norm = feature_norm.unwrap_or_else(|| FeatureNormalization::from_matches(&all_matches));
+
+        // Use existing mapping or create dense team mapping from ALL matches
+        let team_mapping = if let Some(mapping) = existing_mapping {
+            mapping.clone()
+        } else {
+            let mut team_ids: Vec<i64> = all_matches
+                .iter()
+                .flat_map(|m| [m.home_team.0, m.away_team.0])
+                .collect();
+            team_ids.sort();
+            team_ids.dedup();
+            
+            team_ids
+                .into_iter()
+                .enumerate()
+                .map(|(idx, id)| (id, idx as u32))
+                .collect()
+        };
 
         let mut samples = Vec::new();
 
@@ -445,13 +466,19 @@ impl RugbyDataset {
             // Compute comparison features
             let comparison = MatchComparison::from_summaries(&home_summary, &away_summary, is_local);
 
+            // Map team IDs to dense indices
+            // If team not in mapping (e.g. new team in validation set), map to 0 (or ideally a specific UNK token)
+            // For now, mapping to 0 is the safest fallback to avoid crashes, though not ideal model-wise.
+            let home_idx = *team_mapping.get(&target_match.home_team.0).unwrap_or(&0);
+            let away_idx = *team_mapping.get(&target_match.away_team.0).unwrap_or(&0);
+
             samples.push(MatchSample {
                 home_history: home_features,
                 away_history: away_features,
                 home_mask,
                 away_mask,
-                home_team_id: target_match.home_team.0 as u32,
-                away_team_id: target_match.away_team.0 as u32,
+                home_team_id: home_idx,
+                away_team_id: away_idx,
                 home_summary,
                 away_summary,
                 comparison,
@@ -479,6 +506,7 @@ impl RugbyDataset {
             config,
             score_norm,
             feature_norm,
+            team_mapping,
         })
     }
 
@@ -690,12 +718,14 @@ impl RugbyDataset {
         samples: Vec<MatchSample>,
         score_norm: ScoreNormalization,
         feature_norm: FeatureNormalization,
+        team_mapping: HashMap<i64, u32>,
     ) -> Self {
         RugbyDataset {
             samples,
             config: DatasetConfig::default(),
             score_norm,
             feature_norm,
+            team_mapping,
         }
     }
 
@@ -710,12 +740,14 @@ impl RugbyDataset {
                 config: self.config.clone(),
                 score_norm: self.score_norm,
                 feature_norm: self.feature_norm,
+                team_mapping: self.team_mapping.clone(),
             },
             RugbyDataset {
                 samples: val_samples.to_vec(),
                 config: self.config,
                 score_norm: self.score_norm,
                 feature_norm: self.feature_norm,
+                team_mapping: self.team_mapping,
             },
         )
     }

@@ -94,11 +94,12 @@ impl RandomSplitDatasets {
         // Compute normalization from training data only
         let score_norm = compute_score_norm(&train_samples);
         let feature_norm = compute_feature_norm(&train_samples);
+        let team_mapping = full_dataset.team_mapping.clone();
 
         Ok(RandomSplitDatasets {
-            train: RugbyDataset::from_samples(train_samples, score_norm, feature_norm),
-            val: RugbyDataset::from_samples(val_samples, score_norm, feature_norm),
-            test: RugbyDataset::from_samples(test_samples, score_norm, feature_norm),
+            train: RugbyDataset::from_samples(train_samples, score_norm, feature_norm, team_mapping.clone()),
+            val: RugbyDataset::from_samples(val_samples, score_norm, feature_norm, team_mapping.clone()),
+            test: RugbyDataset::from_samples(test_samples, score_norm, feature_norm, team_mapping),
         })
     }
 }
