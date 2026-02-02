@@ -1089,6 +1089,7 @@ pub struct RawMatch {
     pub home_tries: Option<u8>,
     pub away_tries: Option<u8>,
     pub round: Option<u8>,
+    pub venue: Option<String>,
 }
 
 /// Raw fixture data (upcoming match without scores)
