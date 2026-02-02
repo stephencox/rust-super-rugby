@@ -89,6 +89,7 @@ impl Database {
 
         // Default timezone based on country
         let timezone_offset = match country {
+            // Super Rugby
             Country::NewZealand => 12,
             Country::Fiji => 12,
             Country::Australia => 10, // Default to eastern, Force is 8
@@ -97,6 +98,13 @@ impl Database {
             Country::Argentina => -3,
             Country::Samoa => 13,
             Country::Tonga => 13,
+            // Six Nations (all in UTC/GMT+0 to GMT+1)
+            Country::England => 0,
+            Country::France => 1,
+            Country::Ireland => 0,
+            Country::Wales => 0,
+            Country::Scotland => 0,
+            Country::Italy => 1,
         };
 
         // Create new team
