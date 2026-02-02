@@ -683,6 +683,19 @@ impl WikipediaScraper {
                         None
                     };
 
+                    // Try to extract venue from cells after away team
+                    let venue = if i + 2 < cell_texts.len() {
+                        let venue_text = cell_texts[i + 2].trim();
+                        if !venue_text.is_empty() && self.normalize_team_name(venue_text).is_none()
+                        {
+                            Some(venue_text.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     if let (Some(d), Some(ht), Some(at)) = (date, home_team, away_team) {
                         matches.push(RawMatch {
                             date: d,
@@ -693,6 +706,7 @@ impl WikipediaScraper {
                             home_tries: None,
                             away_tries: None,
                             round: None,
+                            venue,
                         });
                     }
                     break;
@@ -722,6 +736,7 @@ impl WikipediaScraper {
             Selector::parse("div[itemtype='http://schema.org/SportsEvent']").unwrap();
         let team_selector = Selector::parse("span.fn.org").unwrap();
         let td_selector = Selector::parse("td").unwrap();
+        let location_selector = Selector::parse("span.location").unwrap();
 
         // Score pattern - created once outside the loop
         let score_pattern = Regex::new(r"(\d{1,3})\s*[–-]\s*(\d{1,3})").unwrap();
@@ -758,6 +773,13 @@ impl WikipediaScraper {
                 }
             }
 
+            // Extract venue
+            let venue = event
+                .select(&location_selector)
+                .next()
+                .map(|loc| loc.text().collect::<String>().trim().to_string())
+                .filter(|s| !s.is_empty());
+
             // Only create match if we have all required fields
             if let (Some(date), Some(home), Some(away), Some(hs), Some(as_)) =
                 (date, home_team, away_team, home_score, away_score)
@@ -771,6 +793,7 @@ impl WikipediaScraper {
                     home_tries: None,
                     away_tries: None,
                     round: None,
+                    venue,
                 });
             }
         }
@@ -902,6 +925,7 @@ impl WikipediaScraper {
                     home_tries: None,
                     away_tries: None,
                     round: None,
+                    venue: None,
                 });
             }
         }
@@ -953,6 +977,7 @@ impl WikipediaScraper {
                     home_tries: None,
                     away_tries: None,
                     round: None,
+                    venue: None,
                 });
             }
         }
@@ -1059,7 +1084,7 @@ impl WikipediaScraper {
                 away_team,
                 home_score: raw.home_score,
                 away_score: raw.away_score,
-                venue: None,
+                venue: raw.venue,
                 round: raw.round,
                 home_tries: raw.home_tries,
                 away_tries: raw.away_tries,
