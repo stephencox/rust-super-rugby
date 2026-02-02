@@ -2,6 +2,7 @@
 
 pub mod lassen;
 pub mod sarugby;
+pub mod sixnations;
 pub mod wikipedia;
 
 use crate::{DataSource, MatchRecord, Result};
