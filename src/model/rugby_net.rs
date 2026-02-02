@@ -43,7 +43,7 @@ pub struct RugbyNetConfig {
 impl Default for RugbyNetConfig {
     fn default() -> Self {
         RugbyNetConfig {
-            input_dim: 15, // MatchFeatures::DIM (with travel + rolling stats)
+            input_dim: crate::features::MatchFeatures::DIM,
             d_model: 128,
             n_heads: 8,
             n_encoder_layers: 4,
@@ -62,7 +62,7 @@ impl RugbyNetConfig {
     /// Create configuration from model config
     pub fn from_model_config(model: &crate::ModelConfig, training: &crate::TrainingConfig) -> Self {
         RugbyNetConfig {
-            input_dim: 15, // MatchFeatures::DIM (with travel + rolling stats)
+            input_dim: crate::features::MatchFeatures::DIM,
             d_model: model.d_model,
             n_heads: model.n_heads,
             n_encoder_layers: model.n_encoder_layers,
@@ -101,11 +101,10 @@ impl RugbyNetConfig {
     fn heads_config(&self) -> HeadsConfig {
         HeadsConfig {
             // Input = fused representation + home embedding + away embedding + comparison features
-            // Comparison features: 5 diffs + 5 home stats + 5 away stats = 15
-            input_dim: self.d_model + 2 * self.team_embed_dim + 15,
+            input_dim: self.d_model + 2 * self.team_embed_dim + crate::data::dataset::MatchComparison::DIM,
             hidden_dim: self.head_hidden_dim,
             dropout: self.dropout,
-            comparison_dim: 15, // Comparison features dimension for direct path
+            comparison_dim: crate::data::dataset::MatchComparison::DIM,
         }
     }
 }
@@ -218,7 +217,7 @@ impl<B: Backend> RugbyNet<B> {
         let full_features = match comparison {
             Some(comp) => Tensor::cat(vec![fused_with_teams, comp], 1),
             None => {
-                let zeros = Tensor::zeros([batch, 5], &device);
+                let zeros = Tensor::zeros([batch, crate::data::dataset::MatchComparison::DIM], &device);
                 Tensor::cat(vec![fused_with_teams, zeros], 1)
             }
         };
@@ -338,6 +337,7 @@ impl MatchPrediction {
 mod tests {
     use super::*;
     use burn::backend::NdArray;
+    use crate::features::MatchFeatures;
 
     type TestBackend = NdArray<f32>;
 
@@ -345,7 +345,7 @@ mod tests {
     fn test_rugby_net() {
         let device = Default::default();
         let config = RugbyNetConfig {
-            input_dim: 15,
+            input_dim: MatchFeatures::DIM,
             d_model: 64,
             n_heads: 4,
             n_encoder_layers: 2,
@@ -361,12 +361,12 @@ mod tests {
         let model = RugbyNet::<TestBackend>::new(&device, config);
 
         let home = Tensor::random(
-            [2, 10, 15],
+            [2, 10, MatchFeatures::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );
         let away = Tensor::random(
-            [2, 10, 15],
+            [2, 10, MatchFeatures::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );
@@ -382,7 +382,7 @@ mod tests {
     fn test_match_prediction() {
         let device = Default::default();
         let config = RugbyNetConfig {
-            input_dim: 15,
+            input_dim: MatchFeatures::DIM,
             d_model: 64,
             n_heads: 4,
             n_encoder_layers: 2,
@@ -398,12 +398,12 @@ mod tests {
         let model = RugbyNet::<TestBackend>::new(&device, config);
 
         let home = Tensor::random(
-            [4, 10, 15],
+            [4, 10, MatchFeatures::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );
         let away = Tensor::random(
-            [4, 10, 15],
+            [4, 10, MatchFeatures::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );

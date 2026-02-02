@@ -25,11 +25,11 @@ pub struct LSTMConfig {
 impl Default for LSTMConfig {
     fn default() -> Self {
         LSTMConfig {
-            input_dim: 15,      // MatchFeatures::DIM
+            input_dim: crate::features::MatchFeatures::DIM,
             hidden_size: 64,
             num_layers: 1,
             bidirectional: false,
-            comparison_dim: 15, // MatchComparison::DIM
+            comparison_dim: crate::data::dataset::MatchComparison::DIM,
         }
     }
 }
@@ -135,25 +135,28 @@ mod tests {
 
     #[test]
     fn test_lstm_model() {
+        use crate::features::MatchFeatures;
+        use crate::data::dataset::MatchComparison;
+
         let device = Default::default();
         let config = LSTMConfig::default();
         let model = LSTMModel::<TestBackend>::new(&device, config);
 
-        // Create dummy inputs
+        // Create dummy inputs with correct dimensions
         let batch_size = 4;
         let seq_len = 10;
         let home_history = Tensor::random(
-            [batch_size, seq_len, 15],
+            [batch_size, seq_len, MatchFeatures::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );
         let away_history = Tensor::random(
-            [batch_size, seq_len, 15],
+            [batch_size, seq_len, MatchFeatures::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );
         let comparison = Tensor::random(
-            [batch_size, 5],
+            [batch_size, MatchComparison::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );

@@ -39,11 +39,28 @@ pub struct MatchFeatures {
     pub pythagorean_exp: f32,
     /// Performance consistency (inverse of margin stdev, normalized)
     pub consistency: f32,
+    // === Temporal features (match-level) ===
+    /// 1.0 if Saturday match
+    pub is_saturday: f32,
+    /// 1.0 if Friday match
+    pub is_friday: f32,
+    /// Season progress (0.0 = Feb, 1.0 = Jul)
+    pub season_progress: f32,
+    /// 1.0 if early season (Feb-Mar)
+    pub is_early_season: f32,
+    /// 1.0 if late season (May-Jul)
+    pub is_late_season: f32,
+    /// Round number normalized (0-1)
+    pub round_normalized: f32,
+    /// 1.0 if short turnaround (<7 days rest)
+    pub short_turnaround: f32,
+    /// Consecutive home/away games (normalized 0-1)
+    pub streak_count: f32,
 }
 
 impl MatchFeatures {
     /// Dimension of feature vector
-    pub const DIM: usize = 15;
+    pub const DIM: usize = 23;
 
     /// Create features from a match record (uses default normalization)
     pub fn from_match(record: &MatchRecord, perspective_team: TeamId) -> Self {
@@ -116,6 +133,15 @@ impl MatchFeatures {
             rolling_margin_avg: 0.0,
             pythagorean_exp: 0.0,
             consistency: 0.0,
+            // Temporal features set externally
+            is_saturday: 0.0,
+            is_friday: 0.0,
+            season_progress: 0.0,
+            is_early_season: 0.0,
+            is_late_season: 0.0,
+            round_normalized: 0.0,
+            short_turnaround: 0.0,
+            streak_count: 0.0,
         }
     }
 
@@ -137,6 +163,14 @@ impl MatchFeatures {
             rolling_margin_avg: 0.0,
             pythagorean_exp: 0.0,
             consistency: 0.0,
+            is_saturday: 0.0,
+            is_friday: 0.0,
+            season_progress: 0.0,
+            is_early_season: 0.0,
+            is_late_season: 0.0,
+            round_normalized: 0.0,
+            short_turnaround: 0.0,
+            streak_count: 0.0,
         }
     }
 
@@ -158,6 +192,14 @@ impl MatchFeatures {
             self.rolling_margin_avg,
             self.pythagorean_exp,
             self.consistency,
+            self.is_saturday,
+            self.is_friday,
+            self.season_progress,
+            self.is_early_season,
+            self.is_late_season,
+            self.round_normalized,
+            self.short_turnaround,
+            self.streak_count,
         ]
     }
 
@@ -182,6 +224,14 @@ impl MatchFeatures {
             rolling_margin_avg: v[12],
             pythagorean_exp: v[13],
             consistency: v[14],
+            is_saturday: v[15],
+            is_friday: v[16],
+            season_progress: v[17],
+            is_early_season: v[18],
+            is_late_season: v[19],
+            round_normalized: v[20],
+            short_turnaround: v[21],
+            streak_count: v[22],
         })
     }
 
@@ -246,6 +296,39 @@ impl MatchFeatures {
         // Max std ~30 points in rugby
         self.consistency = 1.0 - (margin_std / 30.0).clamp(0.0, 1.0);
 
+        self
+    }
+
+    /// Set temporal features for this match
+    ///
+    /// # Arguments
+    /// * `is_saturday` - 1.0 if Saturday match
+    /// * `is_friday` - 1.0 if Friday match
+    /// * `season_progress` - 0.0 (Feb) to 1.0 (Jul)
+    /// * `is_early_season` - 1.0 if Feb-Mar
+    /// * `is_late_season` - 1.0 if May-Jul
+    /// * `round_normalized` - Round number / 20
+    /// * `short_turnaround` - 1.0 if <7 days rest
+    /// * `streak_count` - Consecutive home/away games normalized
+    pub fn with_temporal(
+        mut self,
+        is_saturday: f32,
+        is_friday: f32,
+        season_progress: f32,
+        is_early_season: f32,
+        is_late_season: f32,
+        round_normalized: f32,
+        short_turnaround: f32,
+        streak_count: f32,
+    ) -> Self {
+        self.is_saturday = is_saturday;
+        self.is_friday = is_friday;
+        self.season_progress = season_progress;
+        self.is_early_season = is_early_season;
+        self.is_late_season = is_late_season;
+        self.round_normalized = round_normalized;
+        self.short_turnaround = short_turnaround;
+        self.streak_count = streak_count;
         self
     }
 }
@@ -340,6 +423,14 @@ mod tests {
             rolling_margin_avg: 0.2,
             pythagorean_exp: 0.55,
             consistency: 0.7,
+            is_saturday: 1.0,
+            is_friday: 0.0,
+            season_progress: 0.4,
+            is_early_season: 0.0,
+            is_late_season: 0.0,
+            round_normalized: 0.5,
+            short_turnaround: 0.0,
+            streak_count: 0.25,
         };
 
         let vec = features.to_vec();
@@ -350,6 +441,9 @@ mod tests {
         assert_eq!(restored.travel_hours, features.travel_hours);
         assert_eq!(restored.rolling_win_rate, features.rolling_win_rate);
         assert_eq!(restored.pythagorean_exp, features.pythagorean_exp);
+        assert_eq!(restored.is_saturday, features.is_saturday);
+        assert_eq!(restored.season_progress, features.season_progress);
+        assert_eq!(restored.streak_count, features.streak_count);
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub struct EncoderConfig {
 impl Default for EncoderConfig {
     fn default() -> Self {
         EncoderConfig {
-            input_dim: 15, // MatchFeatures::DIM (with travel + rolling stats)
+            input_dim: crate::features::MatchFeatures::DIM,
             d_model: 128,
             n_heads: 8,
             n_layers: 4,
