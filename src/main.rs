@@ -3,6 +3,8 @@
 //! A deep learning-based match prediction tool using hierarchical transformers.
 
 use clap::{Parser, Subcommand};
+use rugby::data::dataset::MatchComparison;
+use rugby::features::MatchFeatures;
 use rugby::{Config, Result};
 
 #[derive(Parser)]
@@ -1216,11 +1218,11 @@ mod commands {
 
         // Create LSTM config
         let lstm_config = LSTMConfig {
-            input_dim: 15, // MatchFeatures::DIM
+            input_dim: MatchFeatures::DIM,
             hidden_size,
             num_layers: 1,
             bidirectional: false,
-            comparison_dim: 15,
+            comparison_dim: MatchComparison::DIM,
         };
 
         println!("LSTM config:");
@@ -1497,11 +1499,11 @@ mod commands {
 
             // Create model
             let lstm_config = LSTMConfig {
-                input_dim: 15,
+                input_dim: MatchFeatures::DIM,
                 hidden_size: *hidden_size,
                 num_layers: 1,
                 bidirectional: false,
-                comparison_dim: 15,
+                comparison_dim: MatchComparison::DIM,
             };
             let mut model = LSTMModel::<MyAutodiffBackend>::new(&device, lstm_config);
             let mut optimizer = SgdConfig::new().init();

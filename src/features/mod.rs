@@ -5,7 +5,9 @@
 pub mod encoding;
 pub mod match_repr;
 pub mod team_stats;
+pub mod temporal;
 
 pub use encoding::TeamEmbedding;
 pub use match_repr::MatchFeatures;
 pub use team_stats::TeamStatistics;
+pub use temporal::{TemporalContext, TemporalFeatureComputer};

@@ -29,7 +29,7 @@ impl Default for HeadsConfig {
             input_dim: 128,
             hidden_dim: 64,
             dropout: 0.1,
-            comparison_dim: 15,
+            comparison_dim: crate::data::dataset::MatchComparison::DIM,
         }
     }
 }
@@ -176,12 +176,14 @@ mod tests {
 
     #[test]
     fn test_prediction_heads() {
+        use crate::data::dataset::MatchComparison;
+
         let device = Default::default();
         let config = HeadsConfig {
             input_dim: 64,
             hidden_dim: 32,
             dropout: 0.0,
-            comparison_dim: 15,
+            comparison_dim: MatchComparison::DIM,
         };
 
         let heads = PredictionHeads::<TestBackend>::new(&device, config);
@@ -200,12 +202,14 @@ mod tests {
 
     #[test]
     fn test_win_probability() {
+        use crate::data::dataset::MatchComparison;
+
         let device = Default::default();
         let config = HeadsConfig {
             input_dim: 128,
             hidden_dim: 64,
             dropout: 0.1,
-            comparison_dim: 15,
+            comparison_dim: MatchComparison::DIM,
         };
 
         let heads = PredictionHeads::<TestBackend>::new(&device, config);
