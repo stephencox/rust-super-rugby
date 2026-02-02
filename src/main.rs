@@ -579,7 +579,7 @@ mod commands {
             let comparison_tensor = Tensor::<MyBackend, 1>::from_floats(
                 comparison.to_vec().as_slice(),
                 &device,
-            ).reshape([1, 15]);
+            ).reshape([1, MatchComparison::DIM]);
 
             let normalized = feature_norm.normalize(comparison_tensor);
             let output = model.forward(normalized);
@@ -953,7 +953,7 @@ mod commands {
         let comparison_tensor = Tensor::<MyBackend, 1>::from_floats(
             comparison.to_vec().as_slice(),
             &device,
-        ).reshape([1, 15]);
+        ).reshape([1, MatchComparison::DIM]);
 
         let normalized = feature_norm.normalize(comparison_tensor);
         let output = model.forward(normalized);
