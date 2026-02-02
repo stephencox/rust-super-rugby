@@ -309,9 +309,11 @@ mod tests {
 
     #[test]
     fn test_encoder() {
+        use crate::features::MatchFeatures;
+
         let device = Default::default();
         let config = EncoderConfig {
-            input_dim: 15,
+            input_dim: MatchFeatures::DIM,
             d_model: 64,
             n_heads: 4,
             n_layers: 2,
@@ -323,7 +325,7 @@ mod tests {
         let encoder = TeamEncoder::<TestBackend>::new(&device, config);
 
         let x = Tensor::random(
-            [2, 10, 15],
+            [2, 10, MatchFeatures::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );

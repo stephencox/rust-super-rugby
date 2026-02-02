@@ -3,8 +3,9 @@
 //! Uses only comparison features (win_rate_diff, margin_diff, pythagorean_diff, log5, is_local)
 
 use burn::module::Module;
-use burn::nn::{Linear, LinearConfig};
+use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig};
 use burn::record::{FullPrecisionSettings, Recorder};
+use burn::tensor::activation::relu;
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
 
@@ -17,55 +18,73 @@ pub struct MLPConfig {
     pub input_dim: usize,
     /// Hidden layer dimension (0 = linear model only)
     pub hidden_dim: usize,
-    /// Dropout rate (unused for linear model)
+    /// Dropout rate
     pub dropout: f64,
 }
 
 impl Default for MLPConfig {
     fn default() -> Self {
         MLPConfig {
-            input_dim: 5, // comparison features
-            hidden_dim: 0, // Linear model by default
-            dropout: 0.0,
+            input_dim: crate::data::dataset::MatchComparison::DIM,
+            hidden_dim: 64, // Default hidden layer size
+            dropout: 0.1,
         }
     }
 }
 
-/// Simple linear model (logistic regression equivalent)
-///
-/// For win prediction: logit = w·x + b
-/// where x = [win_rate_diff, margin_diff, pythagorean_diff, log5, is_local]
+/// Multi-Layer Perceptron for regression/classification
 #[derive(Module, Debug)]
 pub struct MLPModel<B: Backend> {
-    // Direct linear projection for win prediction
-    win_linear: Linear<B>,
-    // Score prediction (also linear)
-    home_score_linear: Linear<B>,
-    away_score_linear: Linear<B>,
+    // Optional hidden layer
+    hidden: Option<Linear<B>>,
+    dropout: Dropout,
+    // Output heads
+    win_head: Linear<B>,
+    home_score_head: Linear<B>,
+    away_score_head: Linear<B>,
 }
 
 impl<B: Backend> MLPModel<B> {
-    /// Create a new linear model
+    /// Create a new MLP model
     pub fn new(device: &B::Device, config: MLPConfig) -> Self {
+        let (hidden, head_input_dim) = if config.hidden_dim > 0 {
+            (
+                Some(LinearConfig::new(config.input_dim, config.hidden_dim).init(device)),
+                config.hidden_dim,
+            )
+        } else {
+            (None, config.input_dim)
+        };
+
         MLPModel {
-            win_linear: LinearConfig::new(config.input_dim, 1).init(device),
-            home_score_linear: LinearConfig::new(config.input_dim, 1).init(device),
-            away_score_linear: LinearConfig::new(config.input_dim, 1).init(device),
+            hidden,
+            dropout: DropoutConfig::new(config.dropout).init(),
+            win_head: LinearConfig::new(head_input_dim, 1).init(device),
+            home_score_head: LinearConfig::new(head_input_dim, 1).init(device),
+            away_score_head: LinearConfig::new(head_input_dim, 1).init(device),
         }
     }
 
     /// Forward pass
     ///
     /// # Arguments
-    /// * `comparison` - Comparison features [batch, 5]
+    /// * `comparison` - Comparison features [batch, input_dim]
     ///
     /// # Returns
     /// Predictions (win logit, home score, away score)
     pub fn forward(&self, comparison: Tensor<B, 2>) -> Predictions<B> {
+        let x = if let Some(hidden) = &self.hidden {
+            let h = hidden.forward(comparison);
+            let h = relu(h);
+            self.dropout.forward(h)
+        } else {
+            comparison
+        };
+
         Predictions {
-            win_logit: self.win_linear.forward(comparison.clone()),
-            home_score: self.home_score_linear.forward(comparison.clone()),
-            away_score: self.away_score_linear.forward(comparison),
+            win_logit: self.win_head.forward(x.clone()),
+            home_score: self.home_score_head.forward(x.clone()),
+            away_score: self.away_score_head.forward(x),
         }
     }
 
@@ -106,12 +125,14 @@ mod tests {
 
     #[test]
     fn test_mlp_model() {
+        use crate::data::dataset::MatchComparison;
+
         let device = Default::default();
         let config = MLPConfig::default();
         let model = MLPModel::<TestBackend>::new(&device, config);
 
         let comparison = Tensor::random(
-            [4, 5],
+            [4, MatchComparison::DIM],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
         );

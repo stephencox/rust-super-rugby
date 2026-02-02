@@ -88,8 +88,8 @@ where
             feature_norm.std
         );
 
-        // Create model: 15 inputs -> 2 outputs (win_logit, margin)
-        let mut model: Linear<B> = LinearConfig::new(15, 2).init(&self.device);
+        // Create model: comparison features -> 2 outputs (win_logit, margin)
+        let mut model: Linear<B> = LinearConfig::new(crate::data::dataset::MatchComparison::DIM, 2).init(&self.device);
 
         // Full batch - no shuffle
         let batcher_train = MatchBatcher::<B>::new(self.device.clone());
