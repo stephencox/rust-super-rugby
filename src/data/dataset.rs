@@ -247,10 +247,50 @@ pub struct MatchComparison {
     pub home_match_density: f32,
     /// Match density for away team (normalized 0-1)
     pub away_match_density: f32,
+
+    // Elo features (3)
+    /// Home team Elo rating (normalized)
+    pub home_elo: f32,
+    /// Away team Elo rating (normalized)
+    pub away_elo: f32,
+    /// Elo rating difference (normalized)
+    pub elo_diff: f32,
+
+    // Workload features (9)
+    /// Home team matches in last 7 days
+    pub home_matches_7d: f32,
+    /// Home team matches in last 14 days
+    pub home_matches_14d: f32,
+    /// Home team matches in last 21 days
+    pub home_matches_21d: f32,
+    /// Away team matches in last 7 days
+    pub away_matches_7d: f32,
+    /// Away team matches in last 14 days
+    pub away_matches_14d: f32,
+    /// Away team matches in last 21 days
+    pub away_matches_21d: f32,
+    /// Workload differential 7d
+    pub workload_diff_7d: f32,
+    /// Workload differential 14d
+    pub workload_diff_14d: f32,
+    /// Workload differential 21d
+    pub workload_diff_21d: f32,
+
+    // Venue features (5)
+    /// Home team win rate at this venue
+    pub home_venue_win_rate: f32,
+    /// Home team games at this venue (normalized)
+    pub home_venue_games: f32,
+    /// Away team win rate at this venue
+    pub away_venue_win_rate: f32,
+    /// Away team games at this venue (normalized)
+    pub away_venue_games: f32,
+    /// Venue familiarity difference
+    pub venue_familiarity_diff: f32,
 }
 
 impl MatchComparison {
-    pub const DIM: usize = 33; // 15 original + 18 temporal
+    pub const DIM: usize = 50; // 15 original + 18 temporal + 3 elo + 9 workload + 5 venue
 
     /// Compute Log5 probability from two win rates
     pub fn log5_prob(p_a: f32, p_b: f32) -> f32 {
@@ -304,6 +344,26 @@ impl MatchComparison {
             games_since_h2h: 0.0,
             home_match_density: 0.0,
             away_match_density: 0.0,
+            // Elo (default, set via with_elo)
+            home_elo: 0.0,
+            away_elo: 0.0,
+            elo_diff: 0.0,
+            // Workload (default, set via with_workload)
+            home_matches_7d: 0.0,
+            home_matches_14d: 0.0,
+            home_matches_21d: 0.0,
+            away_matches_7d: 0.0,
+            away_matches_14d: 0.0,
+            away_matches_21d: 0.0,
+            workload_diff_7d: 0.0,
+            workload_diff_14d: 0.0,
+            workload_diff_21d: 0.0,
+            // Venue (default, set via with_venue)
+            home_venue_win_rate: 0.5,
+            home_venue_games: 0.0,
+            away_venue_win_rate: 0.5,
+            away_venue_games: 0.0,
+            venue_familiarity_diff: 0.0,
         }
     }
 
@@ -327,6 +387,38 @@ impl MatchComparison {
         self.games_since_h2h = ctx.games_since_h2h;
         self.home_match_density = ctx.home_match_density;
         self.away_match_density = ctx.away_match_density;
+        self
+    }
+
+    /// Set Elo features
+    pub fn with_elo(mut self, elo: &crate::features::EloFeatures) -> Self {
+        self.home_elo = elo.home_elo;
+        self.away_elo = elo.away_elo;
+        self.elo_diff = elo.elo_diff;
+        self
+    }
+
+    /// Set workload features
+    pub fn with_workload(mut self, workload: &crate::features::WorkloadFeatures) -> Self {
+        self.home_matches_7d = workload.home_matches_7d;
+        self.home_matches_14d = workload.home_matches_14d;
+        self.home_matches_21d = workload.home_matches_21d;
+        self.away_matches_7d = workload.away_matches_7d;
+        self.away_matches_14d = workload.away_matches_14d;
+        self.away_matches_21d = workload.away_matches_21d;
+        self.workload_diff_7d = workload.workload_diff_7d;
+        self.workload_diff_14d = workload.workload_diff_14d;
+        self.workload_diff_21d = workload.workload_diff_21d;
+        self
+    }
+
+    /// Set venue features
+    pub fn with_venue(mut self, venue: &crate::features::VenueFeatures) -> Self {
+        self.home_venue_win_rate = venue.home_venue_win_rate;
+        self.home_venue_games = venue.home_venue_games;
+        self.away_venue_win_rate = venue.away_venue_win_rate;
+        self.away_venue_games = venue.away_venue_games;
+        self.venue_familiarity_diff = venue.venue_familiarity_diff;
         self
     }
 
@@ -369,6 +461,26 @@ impl MatchComparison {
             self.games_since_h2h,
             self.home_match_density,
             self.away_match_density,
+            // Elo (3)
+            self.home_elo,
+            self.away_elo,
+            self.elo_diff,
+            // Workload (9)
+            self.home_matches_7d,
+            self.home_matches_14d,
+            self.home_matches_21d,
+            self.away_matches_7d,
+            self.away_matches_14d,
+            self.away_matches_21d,
+            self.workload_diff_7d,
+            self.workload_diff_14d,
+            self.workload_diff_21d,
+            // Venue (5)
+            self.home_venue_win_rate,
+            self.home_venue_games,
+            self.away_venue_win_rate,
+            self.away_venue_games,
+            self.venue_familiarity_diff,
         ]
     }
 }
