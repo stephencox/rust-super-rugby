@@ -2,11 +2,13 @@
 //!
 //! Converts raw match data into model-ready features.
 
+pub mod elo;
 pub mod encoding;
 pub mod match_repr;
 pub mod team_stats;
 pub mod temporal;
 
+pub use elo::{EloConfig, EloFeatures, EloRatings};
 pub use encoding::TeamEmbedding;
 pub use match_repr::MatchFeatures;
 pub use team_stats::TeamStatistics;
