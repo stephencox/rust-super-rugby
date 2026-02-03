@@ -389,6 +389,7 @@ impl SixNationsScraper {
             Selector::parse("div[itemtype='http://schema.org/SportsEvent']").unwrap();
         let team_selector = Selector::parse("span.fn.org").unwrap();
         let td_selector = Selector::parse("td").unwrap();
+        let location_selector = Selector::parse("span.location").unwrap();
 
         let score_pattern = Regex::new(r"(\d{1,3})\s*[–-]\s*(\d{1,3})").unwrap();
 
@@ -419,6 +420,12 @@ impl SixNationsScraper {
                 }
             }
 
+            let venue = event
+                .select(&location_selector)
+                .next()
+                .map(|loc| loc.text().collect::<String>().trim().to_string())
+                .filter(|s| !s.is_empty());
+
             if let (Some(date), Some(home), Some(away), Some(hs), Some(as_)) =
                 (date, home_team, away_team, home_score, away_score)
             {
@@ -431,6 +438,7 @@ impl SixNationsScraper {
                     home_tries: None,
                     away_tries: None,
                     round: None,
+                    venue,
                 });
             }
         }
@@ -538,6 +546,7 @@ impl SixNationsScraper {
                     home_tries: None,
                     away_tries: None,
                     round: None,
+                    venue: None,
                 });
             }
         }
@@ -598,6 +607,19 @@ impl SixNationsScraper {
         None
     }
 
+    /// Infer venue from home team (Six Nations has fixed home stadiums)
+    fn infer_venue(&self, home_team: &str) -> Option<String> {
+        match home_team {
+            "England" => Some("Twickenham".to_string()),
+            "France" => Some("Stade de France".to_string()),
+            "Ireland" => Some("Aviva Stadium".to_string()),
+            "Wales" => Some("Principality Stadium".to_string()),
+            "Scotland" => Some("Murrayfield".to_string()),
+            "Italy" => Some("Stadio Olimpico".to_string()),
+            _ => None,
+        }
+    }
+
     /// Convert raw matches to MatchRecords
     pub fn to_match_records(
         &self,
@@ -610,13 +632,16 @@ impl SixNationsScraper {
             let home_team = team_resolver(&raw.home_team.name, raw.home_team.country)?;
             let away_team = team_resolver(&raw.away_team.name, raw.away_team.country)?;
 
+            // Use scraped venue or infer from home team
+            let venue = raw.venue.or_else(|| self.infer_venue(&raw.home_team.name));
+
             records.push(MatchRecord {
                 date: raw.date,
                 home_team,
                 away_team,
                 home_score: raw.home_score,
                 away_score: raw.away_score,
-                venue: None,
+                venue,
                 round: raw.round,
                 home_tries: raw.home_tries,
                 away_tries: raw.away_tries,

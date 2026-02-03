@@ -5,7 +5,7 @@ use burn::tensor::activation::sigmoid;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{ElementConversion, Tensor};
 
-use crate::data::dataset::{MatchBatch, MatchBatcher, RugbyDataset, ScoreNormalization};
+use crate::data::dataset::{MatchBatch, MatchBatcher, MatchComparison, RugbyDataset, ScoreNormalization};
 use crate::model::heads::Predictions;
 use crate::model::mlp::MLPModel;
 use crate::training::metrics::{Metrics, TrainingHistory};
@@ -19,8 +19,8 @@ pub struct ComparisonNormalization {
 }
 
 impl ComparisonNormalization {
-    /// Dimension of comparison features
-    pub const DIM: usize = 15;
+    /// Dimension of comparison features (matches MatchComparison::DIM)
+    pub const DIM: usize = MatchComparison::DIM;
 
     /// Compute from training dataset
     pub fn from_dataset(dataset: &RugbyDataset) -> Self {

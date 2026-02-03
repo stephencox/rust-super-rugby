@@ -247,10 +247,50 @@ pub struct MatchComparison {
     pub home_match_density: f32,
     /// Match density for away team (normalized 0-1)
     pub away_match_density: f32,
+
+    // Elo features (3)
+    /// Home team Elo rating (normalized)
+    pub home_elo: f32,
+    /// Away team Elo rating (normalized)
+    pub away_elo: f32,
+    /// Elo rating difference (normalized)
+    pub elo_diff: f32,
+
+    // Workload features (9)
+    /// Home team matches in last 7 days
+    pub home_matches_7d: f32,
+    /// Home team matches in last 14 days
+    pub home_matches_14d: f32,
+    /// Home team matches in last 21 days
+    pub home_matches_21d: f32,
+    /// Away team matches in last 7 days
+    pub away_matches_7d: f32,
+    /// Away team matches in last 14 days
+    pub away_matches_14d: f32,
+    /// Away team matches in last 21 days
+    pub away_matches_21d: f32,
+    /// Workload differential 7d
+    pub workload_diff_7d: f32,
+    /// Workload differential 14d
+    pub workload_diff_14d: f32,
+    /// Workload differential 21d
+    pub workload_diff_21d: f32,
+
+    // Venue features (5)
+    /// Home team win rate at this venue
+    pub home_venue_win_rate: f32,
+    /// Home team games at this venue (normalized)
+    pub home_venue_games: f32,
+    /// Away team win rate at this venue
+    pub away_venue_win_rate: f32,
+    /// Away team games at this venue (normalized)
+    pub away_venue_games: f32,
+    /// Venue familiarity difference
+    pub venue_familiarity_diff: f32,
 }
 
 impl MatchComparison {
-    pub const DIM: usize = 33; // 15 original + 18 temporal
+    pub const DIM: usize = 50; // 15 original + 18 temporal + 3 elo + 9 workload + 5 venue
 
     /// Compute Log5 probability from two win rates
     pub fn log5_prob(p_a: f32, p_b: f32) -> f32 {
@@ -304,6 +344,26 @@ impl MatchComparison {
             games_since_h2h: 0.0,
             home_match_density: 0.0,
             away_match_density: 0.0,
+            // Elo (default, set via with_elo)
+            home_elo: 0.0,
+            away_elo: 0.0,
+            elo_diff: 0.0,
+            // Workload (default, set via with_workload)
+            home_matches_7d: 0.0,
+            home_matches_14d: 0.0,
+            home_matches_21d: 0.0,
+            away_matches_7d: 0.0,
+            away_matches_14d: 0.0,
+            away_matches_21d: 0.0,
+            workload_diff_7d: 0.0,
+            workload_diff_14d: 0.0,
+            workload_diff_21d: 0.0,
+            // Venue (default, set via with_venue)
+            home_venue_win_rate: 0.5,
+            home_venue_games: 0.0,
+            away_venue_win_rate: 0.5,
+            away_venue_games: 0.0,
+            venue_familiarity_diff: 0.0,
         }
     }
 
@@ -327,6 +387,38 @@ impl MatchComparison {
         self.games_since_h2h = ctx.games_since_h2h;
         self.home_match_density = ctx.home_match_density;
         self.away_match_density = ctx.away_match_density;
+        self
+    }
+
+    /// Set Elo features
+    pub fn with_elo(mut self, elo: &crate::features::EloFeatures) -> Self {
+        self.home_elo = elo.home_elo;
+        self.away_elo = elo.away_elo;
+        self.elo_diff = elo.elo_diff;
+        self
+    }
+
+    /// Set workload features
+    pub fn with_workload(mut self, workload: &crate::features::WorkloadFeatures) -> Self {
+        self.home_matches_7d = workload.home_matches_7d;
+        self.home_matches_14d = workload.home_matches_14d;
+        self.home_matches_21d = workload.home_matches_21d;
+        self.away_matches_7d = workload.away_matches_7d;
+        self.away_matches_14d = workload.away_matches_14d;
+        self.away_matches_21d = workload.away_matches_21d;
+        self.workload_diff_7d = workload.workload_diff_7d;
+        self.workload_diff_14d = workload.workload_diff_14d;
+        self.workload_diff_21d = workload.workload_diff_21d;
+        self
+    }
+
+    /// Set venue features
+    pub fn with_venue(mut self, venue: &crate::features::VenueFeatures) -> Self {
+        self.home_venue_win_rate = venue.home_venue_win_rate;
+        self.home_venue_games = venue.home_venue_games;
+        self.away_venue_win_rate = venue.away_venue_win_rate;
+        self.away_venue_games = venue.away_venue_games;
+        self.venue_familiarity_diff = venue.venue_familiarity_diff;
         self
     }
 
@@ -369,6 +461,26 @@ impl MatchComparison {
             self.games_since_h2h,
             self.home_match_density,
             self.away_match_density,
+            // Elo (3)
+            self.home_elo,
+            self.away_elo,
+            self.elo_diff,
+            // Workload (9)
+            self.home_matches_7d,
+            self.home_matches_14d,
+            self.home_matches_21d,
+            self.away_matches_7d,
+            self.away_matches_14d,
+            self.away_matches_21d,
+            self.workload_diff_7d,
+            self.workload_diff_14d,
+            self.workload_diff_21d,
+            // Venue (5)
+            self.home_venue_win_rate,
+            self.home_venue_games,
+            self.away_venue_win_rate,
+            self.away_venue_games,
+            self.venue_familiarity_diff,
         ]
     }
 }
@@ -534,6 +646,11 @@ impl RugbyDataset {
         // This ensures we have proper state at each point in time
         temporal_computer.reset();
 
+        // Initialize other feature computers
+        let mut elo_computer = crate::features::EloRatings::default();
+        let mut workload_computer = crate::features::WorkloadComputer::new();
+        let mut venue_tracker = crate::features::VenueTracker::new();
+
         // Sort all matches chronologically for proper temporal feature extraction
         let mut all_sorted: Vec<_> = all_matches.iter().cloned().collect();
         all_sorted.sort_by_key(|m| m.date);
@@ -548,6 +665,23 @@ impl RugbyDataset {
         for m in &all_sorted {
             // Compute temporal context BEFORE updating (so it reflects state before this match)
             let temporal_ctx = temporal_computer.compute(m);
+
+            // Compute Elo features BEFORE updating
+            let elo_features = crate::features::EloFeatures {
+                home_elo: elo_computer.rating_normalized(m.home_team),
+                away_elo: elo_computer.rating_normalized(m.away_team),
+                elo_diff: elo_computer.rating_diff_normalized(m.home_team, m.away_team),
+            };
+
+            // Compute workload features BEFORE updating
+            let workload_features = workload_computer.compute(m.home_team, m.away_team, m.date);
+
+            // Compute venue features BEFORE updating
+            let venue_features = venue_tracker.compute(
+                m.home_team,
+                m.away_team,
+                m.venue.as_deref(),
+            );
 
             // Check if this is a target match we want to include in the dataset
             if target_set.contains(&(m.date, m.home_team, m.away_team)) {
@@ -593,9 +727,12 @@ impl RugbyDataset {
                     let away_country = teams.iter().find(|t| t.id == m.away_team).map(|t| &t.country);
                     let is_local = home_country == away_country;
 
-                    // Compute comparison features with temporal context
+                    // Compute comparison features with all feature contexts
                     let comparison = MatchComparison::from_summaries(&home_summary, &away_summary, is_local)
-                        .with_temporal(&temporal_ctx);
+                        .with_temporal(&temporal_ctx)
+                        .with_elo(&elo_features)
+                        .with_workload(&workload_features)
+                        .with_venue(&venue_features);
 
                     // Map team IDs to dense indices
                     // If team not in mapping (e.g. new team in validation set), map to 0
@@ -624,8 +761,16 @@ impl RugbyDataset {
                 }
             }
 
-            // Update temporal computer state AFTER processing this match
+            // Update all feature computers AFTER processing this match
             temporal_computer.update(m);
+            elo_computer.update(m);
+            workload_computer.update(m.home_team, m.away_team, m.date);
+            venue_tracker.update(
+                m.home_team,
+                m.away_team,
+                m.venue.as_deref(),
+                m.home_score > m.away_score,
+            );
         }
 
         log::info!(
@@ -1086,5 +1231,18 @@ impl<B: burn::tensor::backend::Backend>
             home_score,
             away_score,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_match_comparison_dimension() {
+        let comparison = MatchComparison::default();
+        let vec = comparison.to_vec();
+        assert_eq!(vec.len(), MatchComparison::DIM);
+        assert_eq!(MatchComparison::DIM, 50);
     }
 }
