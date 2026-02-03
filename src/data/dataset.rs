@@ -646,6 +646,11 @@ impl RugbyDataset {
         // This ensures we have proper state at each point in time
         temporal_computer.reset();
 
+        // Initialize other feature computers
+        let mut elo_computer = crate::features::EloRatings::default();
+        let mut workload_computer = crate::features::WorkloadComputer::new();
+        let mut venue_tracker = crate::features::VenueTracker::new();
+
         // Sort all matches chronologically for proper temporal feature extraction
         let mut all_sorted: Vec<_> = all_matches.iter().cloned().collect();
         all_sorted.sort_by_key(|m| m.date);
@@ -660,6 +665,23 @@ impl RugbyDataset {
         for m in &all_sorted {
             // Compute temporal context BEFORE updating (so it reflects state before this match)
             let temporal_ctx = temporal_computer.compute(m);
+
+            // Compute Elo features BEFORE updating
+            let elo_features = crate::features::EloFeatures {
+                home_elo: elo_computer.rating_normalized(m.home_team),
+                away_elo: elo_computer.rating_normalized(m.away_team),
+                elo_diff: elo_computer.rating_diff_normalized(m.home_team, m.away_team),
+            };
+
+            // Compute workload features BEFORE updating
+            let workload_features = workload_computer.compute(m.home_team, m.away_team, m.date);
+
+            // Compute venue features BEFORE updating
+            let venue_features = venue_tracker.compute(
+                m.home_team,
+                m.away_team,
+                m.venue.as_deref(),
+            );
 
             // Check if this is a target match we want to include in the dataset
             if target_set.contains(&(m.date, m.home_team, m.away_team)) {
@@ -705,9 +727,12 @@ impl RugbyDataset {
                     let away_country = teams.iter().find(|t| t.id == m.away_team).map(|t| &t.country);
                     let is_local = home_country == away_country;
 
-                    // Compute comparison features with temporal context
+                    // Compute comparison features with all feature contexts
                     let comparison = MatchComparison::from_summaries(&home_summary, &away_summary, is_local)
-                        .with_temporal(&temporal_ctx);
+                        .with_temporal(&temporal_ctx)
+                        .with_elo(&elo_features)
+                        .with_workload(&workload_features)
+                        .with_venue(&venue_features);
 
                     // Map team IDs to dense indices
                     // If team not in mapping (e.g. new team in validation set), map to 0
@@ -736,8 +761,16 @@ impl RugbyDataset {
                 }
             }
 
-            // Update temporal computer state AFTER processing this match
+            // Update all feature computers AFTER processing this match
             temporal_computer.update(m);
+            elo_computer.update(m);
+            workload_computer.update(m.home_team, m.away_team, m.date);
+            venue_tracker.update(
+                m.home_team,
+                m.away_team,
+                m.venue.as_deref(),
+                m.home_score > m.away_score,
+            );
         }
 
         log::info!(
