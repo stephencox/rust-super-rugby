@@ -1233,3 +1233,16 @@ impl<B: burn::tensor::backend::Backend>
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_match_comparison_dimension() {
+        let comparison = MatchComparison::default();
+        let vec = comparison.to_vec();
+        assert_eq!(vec.len(), MatchComparison::DIM);
+        assert_eq!(MatchComparison::DIM, 50);
+    }
+}
