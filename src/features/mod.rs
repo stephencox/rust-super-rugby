@@ -7,8 +7,10 @@ pub mod encoding;
 pub mod match_repr;
 pub mod team_stats;
 pub mod temporal;
+pub mod workload;
 
 pub use elo::{EloConfig, EloFeatures, EloRatings};
+pub use workload::{WorkloadComputer, WorkloadFeatures};
 pub use encoding::TeamEmbedding;
 pub use match_repr::MatchFeatures;
 pub use team_stats::TeamStatistics;
