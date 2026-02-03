@@ -112,22 +112,22 @@ impl Metrics {
         }
     }
 
-    /// Get home score MAE (scaled back to original score range)
+    /// Get home score MAE (already in original score range)
     pub fn home_score_mae(&self) -> f64 {
         if self.total_predictions == 0 {
             0.0
         } else {
-            // MAE in normalized space * std = MAE in original space
-            (self.home_score_mae_sum / self.total_predictions as f64) * self.score_norm.std as f64
+            // MAE is already in actual points (not normalized)
+            self.home_score_mae_sum / self.total_predictions as f64
         }
     }
 
-    /// Get away score MAE (scaled back to original score range)
+    /// Get away score MAE (already in original score range)
     pub fn away_score_mae(&self) -> f64 {
         if self.total_predictions == 0 {
             0.0
         } else {
-            (self.away_score_mae_sum / self.total_predictions as f64) * self.score_norm.std as f64
+            self.away_score_mae_sum / self.total_predictions as f64
         }
     }
 
