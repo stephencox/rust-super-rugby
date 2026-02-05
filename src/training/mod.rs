@@ -7,11 +7,9 @@ pub mod metrics;
 pub mod mlp_trainer;
 pub mod mlp_tuning;
 pub mod simple_mlp;
-pub mod trainer;
 
 pub use lstm_trainer::LSTMTrainer;
 pub use metrics::Metrics;
 pub use mlp_trainer::MLPTrainer;
 pub use mlp_tuning::{MLPHyperparams, MLPTuner, RandomSplitDatasets, SplitRatios, TuningResult};
 pub use simple_mlp::{SimpleMLPTrainer, OptimizerType, InitMethod};
-pub use trainer::Trainer;

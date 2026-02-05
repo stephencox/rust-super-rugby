@@ -440,7 +440,7 @@ mod commands {
         let device: <MyBackend as burn::tensor::backend::Backend>::Device = Default::default();
         use burn::module::Module;
         let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-        let model: Linear<MyBackend> = LinearConfig::new(15, 2)
+        let model: Linear<MyBackend> = LinearConfig::new(MatchComparison::DIM, 2)
             .init(&device)
             .load_file(&model_path, &recorder, &device)
             .map_err(|e| rugby::RugbyError::Config(format!("Failed to load model: {}", e)))?;
@@ -842,7 +842,7 @@ mod commands {
         let device: <MyBackend as burn::tensor::backend::Backend>::Device = Default::default();
         use burn::module::Module;
         let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-        let model: Linear<MyBackend> = LinearConfig::new(15, 2)
+        let model: Linear<MyBackend> = LinearConfig::new(MatchComparison::DIM, 2)
             .init(&device)
             .load_file(&model_path, &recorder, &device)
             .map_err(|e| rugby::RugbyError::Config(format!("Failed to load model: {}", e)))?;
