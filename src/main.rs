@@ -1,6 +1,6 @@
 //! Super Rugby Prediction CLI
 //!
-//! A deep learning-based match prediction tool using hierarchical transformers.
+//! A deep learning-based match prediction tool using MLP and LSTM models.
 
 use clap::{Parser, Subcommand};
 use rugby::data::dataset::MatchComparison;
@@ -59,18 +59,6 @@ enum Commands {
         /// Hidden size for LSTM
         #[arg(long, default_value = "64")]
         hidden_size: usize,
-    },
-    /// Train Transformer (RugbyNet) model
-    TrainTransformer {
-        /// Override number of epochs
-        #[arg(long)]
-        epochs: Option<usize>,
-        /// Learning rate
-        #[arg(long, default_value = "0.0001")]
-        lr: f64,
-        /// Batch size (0 for full batch)
-        #[arg(long, default_value = "32")]
-        batch_size: usize,
     },
     /// Tune MLP hyperparameters with time-based train/val/test splits
     TuneMlp {
@@ -213,9 +201,6 @@ fn main() {
         }
         Commands::TrainLstm { epochs, lr, hidden_size } => {
             commands::train_lstm(&config, epochs, lr, hidden_size)
-        }
-        Commands::TrainTransformer { epochs, lr, batch_size } => {
-            commands::train_transformer(&config, epochs, lr, batch_size)
         }
         Commands::TuneMlp { max_epochs } => commands::tune_mlp(&config, max_epochs),
         Commands::TuneLstm { max_epochs } => commands::tune_lstm(&config, max_epochs),
@@ -1015,139 +1000,6 @@ mod commands {
     pub fn model_validate(_config: &Config) -> Result<()> {
         println!("Validation not yet implemented");
         println!("Run 'rugby train' to see validation metrics");
-        Ok(())
-    }
-
-    pub fn train_transformer(
-        config: &Config,
-        epochs: Option<usize>,
-        lr: f64,
-        batch_size: usize,
-    ) -> Result<()> {
-        use burn::backend::{Autodiff, NdArray};
-        use chrono::NaiveDate;
-        use rugby::data::dataset::{DatasetConfig, RugbyDataset};
-        use rugby::model::rugby_net::RugbyNetConfig;
-        use rugby::training::TransformerTrainer;
-        use rugby::training::mlp_trainer::ComparisonNormalization;
-
-        type MyBackend = NdArray<f32>;
-        type MyAutodiffBackend = Autodiff<MyBackend>;
-
-        let epochs = epochs.unwrap_or(100);
-
-        println!("Initializing Transformer (RugbyNet) training...");
-
-        // Open database
-        let db = Database::open(&config.data.database_path)?;
-        let stats = db.get_stats()?;
-
-        if stats.match_count == 0 {
-            return Err(rugby::RugbyError::Config(
-                "No matches in database. Run 'rugby data sync' first.".to_string(),
-            ));
-        }
-
-        println!("Loaded {} matches from database", stats.match_count);
-
-        // Create datasets
-        let train_cutoff = NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
-        let val_end = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-
-        let dataset_config = DatasetConfig {
-            max_history: config.model.max_history,
-            min_history: 3,
-        };
-
-        println!("Creating training dataset (before {})...", train_cutoff);
-        let train_dataset =
-            RugbyDataset::from_matches_before(&db, train_cutoff, dataset_config.clone())?;
-        println!("  {} training samples", train_dataset.len());
-
-        println!(
-            "Creating validation dataset ({} to {})...",
-            train_cutoff, val_end
-        );
-        // Important: Reusing training normalization AND MAPPING
-        let val_dataset = RugbyDataset::from_matches_with_norm(
-            &db,
-            db.get_matches_in_range(train_cutoff, val_end)?,
-            dataset_config,
-            Some(train_dataset.score_norm),
-            Some(*train_dataset.feature_norm()),
-            Some(&train_dataset.team_mapping),
-        )?;
-        println!("  {} validation samples", val_dataset.len());
-
-        if train_dataset.is_empty() || val_dataset.is_empty() {
-            return Err(rugby::RugbyError::Config(
-                "Not enough data for training. Need matches before and after 2023.".to_string(),
-            ));
-        }
-
-        // Configure RugbyNet
-        let mut model_config = RugbyNetConfig::from_model_config(&config.model, &config.training);
-        
-        // Update n_teams based on actual data
-        let n_teams = train_dataset.team_mapping.len();
-        println!("  Found {} teams in training data", n_teams);
-        // Add buffer for potential new teams (though they will be mapped to 0/unknown)
-        model_config.n_teams = n_teams + 5; 
-
-        // Create trainer
-        let device = Default::default();
-        let trainer = TransformerTrainer::<MyAutodiffBackend>::new(device, model_config, lr);
-
-        println!("\nStarting Transformer training...\n");
-
-        let (history, trained_model) = trainer.train(train_dataset.clone(), val_dataset, epochs, batch_size)?;
-
-        println!("\nTransformer Training complete!");
-        println!("  Best epoch: {}", history.best_epoch + 1);
-        println!(
-            "  Best val accuracy: {:.1}%",
-            history.val_accuracies.last().unwrap_or(&0.0) * 100.0
-        );
-
-        // Save model
-        let model_path = format!("{}_transformer", config.data.model_path);
-        println!("\nSaving model to {}...", model_path);
-
-        use burn::module::Module;
-        use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-        trained_model
-            .clone()
-            .save_file(&model_path, &recorder)
-            .map_err(|e| rugby::RugbyError::Io(std::io::Error::other(format!("Failed to save model: {}", e))))?;
-
-        // Save normalization AND MAPPING
-        // Compute comparison normalization for metadata (same as Trainer does internally)
-        let comparison_norm = ComparisonNormalization::from_dataset(&train_dataset);
-
-        #[derive(serde::Serialize)]
-        struct MetaParams {
-            feature_mean: Vec<f32>,
-            feature_std: Vec<f32>,
-            score_mean: f32,
-            score_std: f32,
-            team_mapping: std::collections::HashMap<i64, u32>,
-        }
-        let meta = MetaParams {
-            feature_mean: comparison_norm.mean,
-            feature_std: comparison_norm.std,
-            score_mean: train_dataset.score_norm.mean,
-            score_std: train_dataset.score_norm.std,
-            team_mapping: train_dataset.team_mapping.clone(),
-        };
-        let meta_path = format!("{}_meta.json", model_path);
-        let meta_json = serde_json::to_string_pretty(&meta)
-            .map_err(|e| rugby::RugbyError::Config(format!("Failed to serialize metadata: {}", e)))?;
-        std::fs::write(&meta_path, meta_json)?;
-
-        println!("Model saved to {}.mpk", model_path);
-        println!("Metadata saved to {}", meta_path);
-
         Ok(())
     }
 
