@@ -608,6 +608,9 @@ def train_sequence_model(
         val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-5
+    )
 
     # Loss functions
     bce_loss = nn.BCEWithLogitsLoss()
@@ -716,13 +719,16 @@ def train_sequence_model(
             history['val_acc'].append(val_acc)
             history['val_margin_mae'].append(val_margin_mae)
 
+            scheduler.step(val_acc)
+
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
 
             if verbose and (epoch + 1) % 10 == 0:
+                current_lr = optimizer.param_groups[0]['lr']
                 print(f"Epoch {epoch+1:3d}: train_loss={train_loss:.4f}, train_acc={train_acc:.1%}, "
-                      f"val_loss={val_loss:.4f}, val_acc={val_acc:.1%}, val_margin_mae={val_margin_mae:.1f}")
+                      f"val_loss={val_loss:.4f}, val_acc={val_acc:.1%}, val_margin_mae={val_margin_mae:.1f}, lr={current_lr:.1e}")
         else:
             if verbose and (epoch + 1) % 10 == 0:
                 print(f"Epoch {epoch+1:3d}: train_loss={train_loss:.4f}, train_acc={train_acc:.1%}")

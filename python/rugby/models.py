@@ -283,6 +283,9 @@ class SequenceLSTM(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
 
+        # LayerNorm on sequence input (normalizes each timestep's features)
+        self.input_norm = nn.LayerNorm(input_dim)
+
         # Shared LSTM for processing team histories
         self.lstm = nn.LSTM(
             input_size=input_dim,
@@ -291,6 +294,10 @@ class SequenceLSTM(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
         )
+
+        # Temporal attention over LSTM timestep outputs
+        self.attn_fc = nn.Linear(hidden_size, hidden_size)
+        self.attn_score = nn.Linear(hidden_size, 1)
 
         # Dropout for regularization
         self.dropout = nn.Dropout(dropout)
@@ -304,6 +311,22 @@ class SequenceLSTM(nn.Module):
         # FC layer for margin prediction (takes combined + win_prob)
         self.margin_fc = nn.Linear(fc_input_size + 1, hidden_size)
         self.margin_head = nn.Linear(hidden_size, 1)
+
+    def attention(self, lstm_out: torch.Tensor) -> torch.Tensor:
+        """
+        Temporal attention over LSTM outputs.
+
+        Args:
+            lstm_out: LSTM outputs [batch, seq_len, hidden]
+
+        Returns:
+            Context vector [batch, hidden]
+        """
+        energy = torch.tanh(self.attn_fc(lstm_out))       # [B, seq_len, hidden]
+        scores = self.attn_score(energy).squeeze(-1)       # [B, seq_len]
+        weights = torch.softmax(scores, dim=1)             # [B, seq_len]
+        context = (weights.unsqueeze(-1) * lstm_out).sum(dim=1)  # [B, hidden]
+        return context
 
     def forward(
         self,
@@ -322,13 +345,17 @@ class SequenceLSTM(nn.Module):
         Returns:
             Tuple of (win_logit, margin), each [batch, 1]
         """
-        # Process home team history through LSTM
-        _, (home_h, _) = self.lstm(home_history)
-        home_repr = self.dropout(home_h[-1])
+        # Normalize input features
+        home_history = self.input_norm(home_history)
+        away_history = self.input_norm(away_history)
 
-        # Process away team history through same LSTM
-        _, (away_h, _) = self.lstm(away_history)
-        away_repr = self.dropout(away_h[-1])
+        # Process home team history through LSTM with temporal attention
+        home_out, _ = self.lstm(home_history)
+        home_repr = self.dropout(self.attention(home_out))
+
+        # Process away team history through same LSTM with temporal attention
+        away_out, _ = self.lstm(away_history)
+        away_repr = self.dropout(self.attention(away_out))
 
         # Concatenate: [home_repr, away_repr, comparison]
         combined = torch.cat([home_repr, away_repr, comparison], dim=1)
