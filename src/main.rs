@@ -257,12 +257,9 @@ mod commands {
         match source.as_deref() {
             Some("wikipedia") | None => {
                 println!("Syncing from Wikipedia...");
-                let mut scraper = WikipediaScraper::new();
-
-                if let Some(cache_dir) = cache {
-                    println!("Using cache directory: {}", cache_dir);
-                    scraper = scraper.with_cache(&cache_dir);
-                }
+                let cache_dir = cache.unwrap_or_else(|| "data/cache".to_string());
+                println!("Using cache directory: {}", cache_dir);
+                let mut scraper = WikipediaScraper::new().with_cache(&cache_dir);
 
                 if offline {
                     println!("Offline mode: using cached files only");
@@ -339,7 +336,7 @@ mod commands {
     pub fn data_fixtures(_config: &Config, year: u16) -> Result<()> {
         println!("Fetching {} Super Rugby Pacific fixtures from Wikipedia...", year);
 
-        let scraper = WikipediaScraper::new();
+        let scraper = WikipediaScraper::new().with_cache("data/cache");
         let fixtures = scraper.fetch_fixtures(year)?;
 
         if fixtures.is_empty() {
@@ -404,7 +401,7 @@ mod commands {
         }
 
         println!("Fetching {} Super Rugby Pacific fixtures...", year);
-        let scraper = WikipediaScraper::new();
+        let scraper = WikipediaScraper::new().with_cache("data/cache");
         let fixtures = scraper.fetch_fixtures(year)?;
 
         if fixtures.is_empty() {

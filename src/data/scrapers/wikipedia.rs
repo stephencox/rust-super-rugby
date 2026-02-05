@@ -10,6 +10,13 @@ use scraper::{Html, Selector};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// HTTP cache metadata stored alongside cached HTML files.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct CacheMeta {
+    last_modified: Option<String>,
+    etag: Option<String>,
+}
+
 /// Scraper for Wikipedia Super Rugby pages
 pub struct WikipediaScraper {
     client: reqwest::blocking::Client,
@@ -87,6 +94,32 @@ impl WikipediaScraper {
             }
             std::fs::write(&path, html)?;
             log::debug!("Saved to cache: {}", path.display());
+        }
+        Ok(())
+    }
+
+    /// Get the metadata sidecar path for a URL (`.meta.json` next to the `.html`)
+    fn meta_path(&self, url: &str) -> Option<PathBuf> {
+        self.cache_path(url).map(|p| p.with_extension("meta.json"))
+    }
+
+    /// Load cache metadata for a URL
+    fn load_meta(&self, url: &str) -> CacheMeta {
+        self.meta_path(url)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Save cache metadata for a URL
+    fn save_meta(&self, url: &str, meta: &CacheMeta) -> Result<()> {
+        if let Some(path) = self.meta_path(url) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let json = serde_json::to_string(meta)
+                .map_err(|e| RugbyError::Parse(e.to_string()))?;
+            std::fs::write(&path, json)?;
         }
         Ok(())
     }
@@ -394,26 +427,7 @@ impl WikipediaScraper {
 
         log::info!("Fetching {} fixtures from {}", year, url);
 
-        // Try cache first
-        let html = if let Some(cached) = self.load_from_cache(&url) {
-            cached
-        } else if self.offline_only {
-            return Err(RugbyError::Scraper {
-                data_source: DataSource::Wikipedia,
-                message: format!("No cached data for {} (offline mode)", url),
-            });
-        } else {
-            let response = self.client.get(&url).send()?;
-            if !response.status().is_success() {
-                return Err(RugbyError::Scraper {
-                    data_source: DataSource::Wikipedia,
-                    message: format!("HTTP {}: {}", response.status(), url),
-                });
-            }
-            let html = response.text()?;
-            let _ = self.save_to_cache(&url, &html);
-            html
-        };
+        let html = self.fetch_conditional(&url)?;
 
         self.parse_fixtures(&html)
     }
@@ -522,39 +536,87 @@ impl WikipediaScraper {
         Ok(fixtures)
     }
 
-    /// Fetch and parse a Wikipedia page (uses cache if available)
-    fn fetch_page(&self, url: &str) -> Result<Vec<RawMatch>> {
-        // Try cache first
-        if let Some(html) = self.load_from_cache(url) {
-            return self.parse_page(&html);
-        }
+    /// Fetch a URL using HTTP conditional requests (If-Modified-Since / If-None-Match).
+    ///
+    /// When a cached copy exists, sends conditional headers so the server can
+    /// respond with 304 Not Modified, avoiding a full re-download.
+    fn fetch_conditional(&self, url: &str) -> Result<String> {
+        let have_cache = self.cache_path(url).map(|p| p.exists()).unwrap_or(false);
 
-        // If offline-only, fail
         if self.offline_only {
-            return Err(RugbyError::Scraper {
+            return self.load_from_cache(url).ok_or_else(|| RugbyError::Scraper {
                 data_source: DataSource::Wikipedia,
                 message: format!("No cached data for {} (offline mode)", url),
             });
         }
 
-        log::debug!("Fetching {}", url);
+        // Build request, adding conditional headers when we have a cached copy
+        let mut request = self.client.get(url);
+        if have_cache {
+            let meta = self.load_meta(url);
+            if let Some(ref lm) = meta.last_modified {
+                request = request.header("If-Modified-Since", lm.as_str());
+            }
+            if let Some(ref etag) = meta.etag {
+                request = request.header("If-None-Match", etag.as_str());
+            }
+        }
 
-        let response = self.client.get(url).send()?;
+        log::debug!("Fetching {} (conditional={})", url, have_cache);
 
-        if !response.status().is_success() {
-            return Err(RugbyError::Scraper {
+        let response = request.send()?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            // 304 – cache is still fresh
+            log::info!("304 Not Modified, using cache for {}", url);
+            return self.load_from_cache(url).ok_or_else(|| RugbyError::Scraper {
                 data_source: DataSource::Wikipedia,
-                message: format!("HTTP {}: {}", response.status(), url),
+                message: format!("Cache file missing after 304 for {}", url),
             });
         }
 
+        if !status.is_success() {
+            // Network error but we have a stale cache – prefer stale over failure
+            if let Some(cached) = self.load_from_cache(url) {
+                log::warn!("HTTP {} for {}, falling back to stale cache", status, url);
+                return Ok(cached);
+            }
+            return Err(RugbyError::Scraper {
+                data_source: DataSource::Wikipedia,
+                message: format!("HTTP {}: {}", status, url),
+            });
+        }
+
+        // 200 OK – extract caching headers and store
+        let new_meta = CacheMeta {
+            last_modified: response
+                .headers()
+                .get("Last-Modified")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            etag: response
+                .headers()
+                .get("ETag")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+        };
+
         let html = response.text()?;
 
-        // Save to cache
         if let Err(e) = self.save_to_cache(url, &html) {
             log::warn!("Failed to cache {}: {}", url, e);
         }
+        if let Err(e) = self.save_meta(url, &new_meta) {
+            log::warn!("Failed to save cache meta for {}: {}", url, e);
+        }
 
+        Ok(html)
+    }
+
+    /// Fetch and parse a Wikipedia page using conditional HTTP requests
+    fn fetch_page(&self, url: &str) -> Result<Vec<RawMatch>> {
+        let html = self.fetch_conditional(url)?;
         self.parse_page(&html)
     }
 
