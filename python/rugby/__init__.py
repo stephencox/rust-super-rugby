@@ -1,6 +1,6 @@
 """Rugby match prediction package."""
 
-from .data import Database, load_matches, load_teams
+from .data import Database, Match, Team, load_matches, load_teams
 from .features import (
     FeatureBuilder,
     FeatureNormalizer,
@@ -25,9 +25,13 @@ from .training import (
     evaluate_score_model,
     evaluate_match_predictor,
 )
+from .config import Config
 
 __all__ = [
+    'Config',
     'Database',
+    'Match',
+    'Team',
     'load_matches',
     'load_teams',
     'FeatureBuilder',

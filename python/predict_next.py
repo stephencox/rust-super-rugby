@@ -12,16 +12,12 @@ Usage:
 """
 
 import argparse
-import re
-from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
-import requests
 import torch
-from bs4 import BeautifulSoup
 
 from rugby.data import Database, Team
 from rugby.features import (
@@ -32,188 +28,11 @@ from rugby.features import (
     SequenceNormalizer,
 )
 from rugby.models import MatchPredictor, SequenceLSTM
+from rugby.scrapers import WikipediaScraper, HttpCache
 
 
 MODEL_DIR = Path(__file__).parent.parent / "model"
 CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
-
-# Team aliases: map Wikipedia names to database names
-TEAM_ALIASES = {
-    "blues": "Blues",
-    "auckland blues": "Blues",
-    "chiefs": "Chiefs",
-    "waikato chiefs": "Chiefs",
-    "crusaders": "Crusaders",
-    "canterbury crusaders": "Crusaders",
-    "highlanders": "Highlanders",
-    "otago highlanders": "Highlanders",
-    "hurricanes": "Hurricanes",
-    "wellington hurricanes": "Hurricanes",
-    "moana pasifika": "Moana Pasifika",
-    "brumbies": "Brumbies",
-    "act brumbies": "Brumbies",
-    "reds": "Reds",
-    "queensland reds": "Reds",
-    "waratahs": "Waratahs",
-    "nsw waratahs": "Waratahs",
-    "new south wales waratahs": "Waratahs",
-    "force": "Force",
-    "western force": "Force",
-    "rebels": "Rebels",
-    "melbourne rebels": "Rebels",
-    "bulls": "Bulls",
-    "blue bulls": "Bulls",
-    "vodacom bulls": "Bulls",
-    "lions": "Lions",
-    "golden lions": "Lions",
-    "emirates lions": "Lions",
-    "sharks": "Sharks",
-    "natal sharks": "Sharks",
-    "cell c sharks": "Sharks",
-    "the sharks": "Sharks",
-    "stormers": "Stormers",
-    "dhl stormers": "Stormers",
-    "western province stormers": "Stormers",
-    "cheetahs": "Cheetahs",
-    "free state cheetahs": "Cheetahs",
-    "kings": "Kings",
-    "southern kings": "Kings",
-    "sunwolves": "Sunwolves",
-    "jaguares": "Jaguares",
-    "fijian drua": "Fijian Drua",
-    "drua": "Fijian Drua",
-}
-
-
-@dataclass
-class Fixture:
-    date: date
-    home_team: str
-    away_team: str
-    venue: Optional[str]
-    round: Optional[int]
-
-
-def normalize_team_name(name: str) -> Optional[str]:
-    """Map a Wikipedia team name to a canonical name."""
-    cleaned = re.sub(r"[\[\]*†]", "", name).strip().lower()
-    if cleaned in TEAM_ALIASES:
-        return TEAM_ALIASES[cleaned]
-    # Partial match
-    for alias, canonical in TEAM_ALIASES.items():
-        if cleaned in alias or alias in cleaned:
-            return canonical
-    return None
-
-
-def parse_date(text: str) -> Optional[date]:
-    """Extract a date from text."""
-    months = {
-        "january": 1, "february": 2, "march": 3, "april": 4,
-        "may": 5, "june": 6, "july": 7, "august": 8,
-        "september": 9, "october": 10, "november": 11, "december": 12,
-    }
-    # "13 February 2026"
-    m = re.search(
-        r"(\d{1,2})\s+(January|February|March|April|May|June|July|August|"
-        r"September|October|November|December)\s+(\d{4})",
-        text, re.IGNORECASE,
-    )
-    if m:
-        day, month_str, year = int(m.group(1)), m.group(2).lower(), int(m.group(3))
-        return date(year, months[month_str], day)
-    return None
-
-
-def fetch_fixtures(year: int) -> List[Fixture]:
-    """Fetch upcoming fixtures from Wikipedia, using cache when available."""
-    url = f"https://en.wikipedia.org/wiki/List_of_{year}_Super_Rugby_Pacific_matches"
-
-    # Try cache first (shared with Rust scraper)
-    cache_file = CACHE_DIR / (
-        url.replace("https://", "").replace("/", "_").replace("?", "_") + ".html"
-    )
-
-    html = None
-    if cache_file.exists():
-        print(f"Using cached fixtures from {cache_file.name}")
-        html = cache_file.read_text()
-    else:
-        print(f"Fetching fixtures from Wikipedia...")
-        resp = requests.get(url, headers={"User-Agent": "rugby-predictor/0.1"}, timeout=30)
-        resp.raise_for_status()
-        html = resp.text
-        # Save to cache
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(html)
-
-    return parse_fixtures(html)
-
-
-def parse_fixtures(html: str) -> List[Fixture]:
-    """Parse upcoming fixtures from Wikipedia HTML."""
-    soup = BeautifulSoup(html, "html.parser")
-    score_re = re.compile(r"\d{1,3}\s*[–\-]\s*\d{1,3}")
-    fixtures = []
-
-    for event in soup.find_all("div", itemtype="http://schema.org/SportsEvent"):
-        event_text = event.get_text()
-        match_date = parse_date(event_text)
-
-        # Find teams (span.fn.org)
-        teams = event.find_all("span", class_="fn")
-        if len(teams) < 2:
-            continue
-        home_name = normalize_team_name(teams[0].get_text())
-        away_name = normalize_team_name(teams[1].get_text())
-
-        # Skip if match already has a score
-        has_score = False
-        for td in event.find_all("td"):
-            if score_re.search(td.get_text()):
-                has_score = True
-                break
-        if has_score:
-            continue
-
-        # Venue
-        loc = event.find("span", class_="location")
-        venue = loc.get_text().strip() if loc else None
-
-        if match_date and home_name and away_name:
-            fixtures.append(Fixture(
-                date=match_date,
-                home_team=home_name,
-                away_team=away_name,
-                venue=venue,
-                round=None,
-            ))
-
-    # Deduplicate
-    seen = set()
-    unique = []
-    for f in fixtures:
-        key = (f.date, f.home_team, f.away_team)
-        if key not in seen:
-            seen.add(key)
-            unique.append(f)
-    fixtures = sorted(unique, key=lambda f: (f.date, f.home_team))
-
-    # Infer round numbers: group dates within 3 days
-    if fixtures:
-        dates = sorted(set(f.date for f in fixtures))
-        date_to_round = {}
-        current_round = 1
-        round_start = dates[0]
-        for d in dates:
-            if (d - round_start).days > 3:
-                current_round += 1
-                round_start = d
-            date_to_round[d] = current_round
-        for f in fixtures:
-            f.round = date_to_round[f.date]
-
-    return fixtures
 
 
 def find_db_team(teams: Dict[int, Team], name: str) -> Optional[Team]:
@@ -349,33 +168,36 @@ def main():
                         help="Re-fetch fixtures from Wikipedia (ignore cache)")
     args = parser.parse_args()
 
-    # Fetch fixtures
-    if args.refresh:
-        # Delete cached file to force re-fetch
-        url = f"https://en.wikipedia.org/wiki/List_of_{args.year}_Super_Rugby_Pacific_matches"
-        cache_file = CACHE_DIR / (
-            url.replace("https://", "").replace("/", "_").replace("?", "_") + ".html"
-        )
-        if cache_file.exists():
-            cache_file.unlink()
+    # Fetch fixtures using scrapers module
+    cache = HttpCache(CACHE_DIR)
+    scraper = WikipediaScraper(cache)
 
-    fixtures = fetch_fixtures(args.year)
-    if not fixtures:
+    if args.refresh:
+        # Delete cached files to force re-fetch
+        for url in scraper.get_season_urls(args.year):
+            cache_path = CACHE_DIR / (
+                url.replace("https://", "").replace("/", "_").replace("?", "_") + ".html"
+            )
+            if cache_path.exists():
+                cache_path.unlink()
+
+    raw_fixtures = scraper.fetch_fixtures(args.year)
+    if not raw_fixtures:
         print(f"No upcoming fixtures found for {args.year}.")
         return
 
     # Filter by round
     if args.round is not None:
-        fixtures = [f for f in fixtures if f.round == args.round]
-        if not fixtures:
+        raw_fixtures = [f for f in raw_fixtures if f.round == args.round]
+        if not raw_fixtures:
             print(f"No fixtures found for round {args.round}.")
             return
     elif not args.all:
         # Default: next round (earliest round number)
-        min_round = min(f.round for f in fixtures if f.round is not None)
-        fixtures = [f for f in fixtures if f.round == min_round]
+        min_round = min(f.round for f in raw_fixtures if f.round is not None)
+        raw_fixtures = [f for f in raw_fixtures if f.round == min_round]
 
-    round_num = fixtures[0].round
+    round_num = raw_fixtures[0].round
     if not args.json and not args.csv:
         print(f"Predicting Round {round_num} fixtures...\n" if round_num else "")
 
@@ -404,15 +226,15 @@ def main():
 
     # Predict
     results = []
-    for fixture in fixtures:
-        home_team = find_db_team(teams, fixture.home_team)
-        away_team = find_db_team(teams, fixture.away_team)
+    for fixture in raw_fixtures:
+        home_team = find_db_team(teams, fixture.home_team.name)
+        away_team = find_db_team(teams, fixture.away_team.name)
 
         if not home_team:
-            print(f"  Warning: Unknown team '{fixture.home_team}'") if not args.json else None
+            print(f"  Warning: Unknown team '{fixture.home_team.name}'") if not args.json else None
             continue
         if not away_team:
-            print(f"  Warning: Unknown team '{fixture.away_team}'") if not args.json else None
+            print(f"  Warning: Unknown team '{fixture.away_team.name}'") if not args.json else None
             continue
 
         pred = predict_fn(home_team, away_team)
