@@ -41,7 +41,7 @@ from rugby.features import (
     SequenceNormalizer,
 )
 from rugby.models import MatchPredictor, SequenceLSTM
-from rugby.scrapers import WikipediaScraper, HttpCache
+from rugby.scrapers import WikipediaScraper, SixNationsScraper, HttpCache
 from rugby.training import (
     train_match_predictor,
     evaluate_match_predictor,
@@ -77,7 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     data_sub = data_parser.add_subparsers(dest="data_command")
 
     sync_p = data_sub.add_parser("sync", help="Scrape Wikipedia and populate database")
-    sync_p.add_argument("--source", default="wikipedia", help="Data source (default: wikipedia)")
+    sync_p.add_argument("--source", default="super-rugby",
+                        choices=["super-rugby", "sixnations"],
+                        help="Data source (default: super-rugby)")
     sync_p.add_argument("--cache", type=str, default=None, help="Cache directory")
     sync_p.add_argument("--offline", action="store_true", help="Use cached data only")
 
@@ -86,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     fixtures_p = data_sub.add_parser("fixtures", help="Fetch upcoming fixtures for a year")
     fixtures_p.add_argument("year", type=int, help="Season year")
+    fixtures_p.add_argument("--source", default="super-rugby",
+                            choices=["super-rugby", "sixnations"],
+                            help="Data source (default: super-rugby)")
 
     data_sub.add_parser("status", help="Show database statistics")
 
@@ -194,12 +199,21 @@ def cmd_data_sync(args, config: Config):
         db_path = PROJECT_ROOT / db_path
 
     cache = HttpCache(cache_dir, offline=args.offline)
-    scraper = WikipediaScraper(cache)
 
-    start_year = 1996
+    if args.source == "sixnations":
+        scraper = SixNationsScraper(cache)
+        start_year = 2000
+        label = "Six Nations"
+    else:
+        scraper = WikipediaScraper(cache)
+        start_year = 1996
+        label = "Super Rugby"
+
     end_year = datetime.now().year
     years = range(start_year, end_year + 1)
     total = len(years)
+
+    print(f"Syncing {label} data from Wikipedia...")
 
     raw_matches = []
     for i, year in enumerate(years, 1):
@@ -288,14 +302,20 @@ def cmd_data_parse_cache(args, config: Config):
 def cmd_data_fixtures(args, config: Config):
     """Fetch upcoming fixtures for a year."""
     cache = HttpCache(CACHE_DIR)
-    scraper = WikipediaScraper(cache)
+
+    if args.source == "sixnations":
+        scraper = SixNationsScraper(cache)
+        label = "Six Nations"
+    else:
+        scraper = WikipediaScraper(cache)
+        label = "Super Rugby Pacific"
 
     fixtures = scraper.fetch_fixtures(args.year)
     if not fixtures:
         print(f"No upcoming fixtures found for {args.year}.")
         return
 
-    print(f"{args.year} Super Rugby Pacific Fixtures\n")
+    print(f"{args.year} {label} Fixtures\n")
     current_round = None
     for f in fixtures:
         if f.round != current_round:
