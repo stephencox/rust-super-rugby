@@ -239,17 +239,29 @@ class WikipediaScraper:
         self.cache = cache
 
     def get_season_urls(self, year: int) -> List[str]:
-        """Get Wikipedia URLs for a season, based on competition era."""
+        """Get Wikipedia URLs for a season, based on competition era.
+
+        Older seasons (1996-2015) have all match data on the season page.
+        From 2016+, match results are on separate List_of_ pages.
+        """
         base = self.BASE_URL
         if 1996 <= year <= 2005:
             return [f"{base}{year}_Super_12_season"]
         elif 2006 <= year <= 2010:
             return [f"{base}{year}_Super_14_season"]
-        elif 2011 <= year <= 2021:
+        elif 2011 <= year <= 2015:
             return [f"{base}{year}_Super_Rugby_season"]
+        elif 2016 <= year <= 2021:
+            return [
+                f"{base}{year}_Super_Rugby_season",
+                f"{base}List_of_{year}_Super_Rugby_matches",
+            ]
         else:
             # 2022+ Super Rugby Pacific
-            return [f"{base}{year}_Super_Rugby_Pacific_season"]
+            return [
+                f"{base}{year}_Super_Rugby_Pacific_season",
+                f"{base}List_of_{year}_Super_Rugby_Pacific_matches",
+            ]
 
     def fetch_season(self, year: int) -> List[RawMatch]:
         """Fetch and parse all matches for a season."""

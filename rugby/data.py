@@ -65,9 +65,15 @@ class Database:
     # Schema management
     # ------------------------------------------------------------------
 
-    def init_schema(self):
-        """Create tables and indexes if they don't exist."""
+    def init_schema(self, reset: bool = False):
+        """Create tables and indexes. If reset=True, drop existing tables first."""
         cursor = self.conn.cursor()
+        if reset:
+            cursor.executescript("""
+                DROP TABLE IF EXISTS predictions;
+                DROP TABLE IF EXISTS matches;
+                DROP TABLE IF EXISTS teams;
+            """)
         cursor.executescript("""
             CREATE TABLE IF NOT EXISTS teams (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

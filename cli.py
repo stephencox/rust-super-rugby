@@ -159,8 +159,8 @@ def cmd_init(args, config: Config):
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with Database(db_path) as db:
-        db.init_schema()
-    print(f"Database initialized at {db_path}")
+        db.init_schema(reset=True)
+    print(f"Database initialized (reset) at {db_path}")
 
 
 def cmd_data_status(args, config: Config):
@@ -194,12 +194,23 @@ def cmd_data_sync(args, config: Config):
     cache = HttpCache(cache_dir, offline=args.offline)
     scraper = WikipediaScraper(cache)
 
-    print("Syncing Super Rugby data from Wikipedia...")
-    raw_matches = scraper.fetch_all()
-    print(f"  Scraped {len(raw_matches)} matches")
+    start_year = 1996
+    end_year = datetime.now().year
+    years = range(start_year, end_year + 1)
+    total = len(years)
+
+    raw_matches = []
+    for i, year in enumerate(years, 1):
+        print(f"\r  Fetching {year} [{i}/{total}]", end="", flush=True)
+        try:
+            matches = scraper.fetch_season(year)
+            raw_matches.extend(matches)
+        except Exception as e:
+            log.warning("Failed to fetch season %d: %s", year, e)
+    print(f"\r  Scraped {len(raw_matches)} matches from {start_year}-{end_year}")
 
     with Database(db_path) as db:
-        db.init_schema()
+        db.init_schema(reset=True)
         count = 0
         for raw in raw_matches:
             home_id = db.get_or_create_team(
