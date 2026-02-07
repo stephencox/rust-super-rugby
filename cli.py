@@ -2,7 +2,7 @@
 """Unified CLI for rugby prediction system.
 
 Usage:
-    python -m rugby.cli [--config CONFIG] [--verbose] <command> [args...]
+    python cli.py [--config CONFIG] [--verbose] <command> [args...]
 
 Commands:
     data sync       Scrape Wikipedia and populate database
@@ -31,18 +31,18 @@ from typing import Optional
 import numpy as np
 import torch
 
-from .config import Config
-from .data import Database, DEFAULT_DB_PATH
-from .features import (
+from rugby.config import Config
+from rugby.data import Database, DEFAULT_DB_PATH
+from rugby.features import (
     FeatureBuilder,
     FeatureNormalizer,
     MatchFeatures,
     SequenceFeatureBuilder,
     SequenceNormalizer,
 )
-from .models import MatchPredictor, SequenceLSTM
-from .scrapers import WikipediaScraper, HttpCache
-from .training import (
+from rugby.models import MatchPredictor, SequenceLSTM
+from rugby.scrapers import WikipediaScraper, HttpCache
+from rugby.training import (
     train_match_predictor,
     evaluate_match_predictor,
     train_sequence_model,
@@ -52,7 +52,7 @@ from .training import (
 log = logging.getLogger(__name__)
 
 # Paths relative to project root
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+PROJECT_ROOT = Path(__file__).parent
 MODEL_DIR = PROJECT_ROOT / "model"
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 
@@ -439,6 +439,8 @@ def cmd_train_lstm(args, config: Config):
         model, train_samples, val_samples,
         lr=lr, epochs=epochs, batch_size=config.training.batch_size,
         weight_decay=config.training.weight_decay,
+        label_smoothing=0.05,
+        augment_swap=True,
     )
 
     print(f"\n  Best validation accuracy: {history['best_val_acc']:.1%}")
@@ -455,7 +457,7 @@ def cmd_train_lstm(args, config: Config):
 
 def cmd_tune_mlp(args, config: Config):
     """Hyperparameter search for MLP."""
-    from .tuning import tune_mlp
+    from rugby.tuning import tune_mlp
 
     db_path = Path(config.data.database_path)
     if not db_path.is_absolute():
@@ -517,7 +519,7 @@ def cmd_tune_mlp(args, config: Config):
 
 def cmd_tune_lstm(args, config: Config):
     """Hyperparameter search for LSTM."""
-    from .tuning import tune_lstm
+    from rugby.tuning import tune_lstm
 
     db_path = Path(config.data.database_path)
     if not db_path.is_absolute():
@@ -694,27 +696,196 @@ def cmd_predict(args, config: Config):
 
 
 def cmd_predict_next(args, config: Config):
-    """Predict upcoming fixtures (delegates to predict_next.py logic)."""
-    # Import predict_next module to reuse its main logic
-    sys.argv = ["predict_next"]
-    argv_parts = []
-    if args.year != datetime.now().year:
-        argv_parts.extend(["--year", str(args.year)])
+    """Predict upcoming fixtures."""
+    db_path = Path(config.data.database_path)
+    if not db_path.is_absolute():
+        db_path = PROJECT_ROOT / db_path
+
+    # Fetch fixtures
+    cache = HttpCache(CACHE_DIR)
+    scraper = WikipediaScraper(cache)
+
+    raw_fixtures = scraper.fetch_fixtures(args.year)
+    if not raw_fixtures:
+        print(f"No upcoming fixtures found for {args.year}.")
+        return
+
+    # Filter by round
     if args.round is not None:
-        argv_parts.extend(["--round", str(args.round)])
-    if args.model != "mlp":
-        argv_parts.extend(["--model", args.model])
-    if args.format == "json":
-        argv_parts.append("--json")
-    elif args.format == "csv":
-        argv_parts.append("--csv")
+        raw_fixtures = [f for f in raw_fixtures if f.round == args.round]
+        if not raw_fixtures:
+            print(f"No fixtures found for round {args.round}.")
+            return
+    else:
+        # Default: next round (earliest round number)
+        min_round = min(f.round for f in raw_fixtures if f.round is not None)
+        raw_fixtures = [f for f in raw_fixtures if f.round == min_round]
 
-    sys.argv = ["predict_next"] + argv_parts
+    round_num = raw_fixtures[0].round
+    output_json = args.format == "json"
+    output_csv = args.format == "csv"
 
-    # Import and run predict_next.main directly
-    from importlib import import_module
-    predict_next = import_module("predict_next")
-    predict_next.main()
+    if not output_json and not output_csv:
+        print(f"Predicting Round {round_num} fixtures...\n" if round_num else "")
+
+    # Load data
+    with Database(db_path) as db:
+        matches = db.get_matches()
+        teams = db.get_teams()
+
+    # Build features and load model
+    if args.model == "lstm":
+        if not output_json and not output_csv:
+            print("Loading LSTM model...")
+        builder = SequenceFeatureBuilder(matches, teams, seq_len=10)
+        for match in sorted(matches, key=lambda m: m.date):
+            builder.process_match(match)
+
+        norm_data = np.load(MODEL_DIR / "lstm_normalizer.npz")
+        normalizer = SequenceNormalizer()
+        normalizer.seq_mean = norm_data["seq_mean"]
+        normalizer.seq_std = norm_data["seq_std"]
+        normalizer.comp_mean = norm_data["comp_mean"]
+        normalizer.comp_std = norm_data["comp_std"]
+
+        model = SequenceLSTM(input_dim=23, hidden_size=64, num_layers=1,
+                             comparison_dim=50, dropout=0.3)
+        model.load(MODEL_DIR / "lstm_model.pt")
+        model.train(False)
+
+        def predict_fn(home_team, away_team):
+            now = datetime.now()
+            home_seq = builder._build_team_sequence(home_team.id, now)
+            away_seq = builder._build_team_sequence(away_team.id, now)
+            comparison = builder._build_comparison_features(home_team.id, away_team.id, now)
+            if home_seq is None or away_seq is None or comparison is None:
+                return None
+            home_seq_norm = (home_seq - normalizer.seq_mean) / normalizer.seq_std
+            away_seq_norm = (away_seq - normalizer.seq_mean) / normalizer.seq_std
+            comp_norm = (comparison - normalizer.comp_mean) / normalizer.comp_std
+            with torch.no_grad():
+                preds = model.predict(
+                    torch.tensor(home_seq_norm, dtype=torch.float32).unsqueeze(0),
+                    torch.tensor(away_seq_norm, dtype=torch.float32).unsqueeze(0),
+                    torch.tensor(comp_norm, dtype=torch.float32).unsqueeze(0),
+                )
+            return preds["win_prob"].item(), preds["margin"].item()
+    else:
+        if not output_json and not output_csv:
+            print("Loading MLP model...")
+        builder = FeatureBuilder(matches, teams)
+        for match in sorted(matches, key=lambda m: m.date):
+            builder.build_features(match)
+            builder.process_match(match)
+
+        norm_data = np.load(MODEL_DIR / "normalizer.npz")
+        normalizer = FeatureNormalizer()
+        normalizer.mean = norm_data["mean"]
+        normalizer.std = norm_data["std"]
+
+        model = MatchPredictor(len(normalizer.mean), hidden_dims=[64])
+        model.load(MODEL_DIR / "match_predictor.pt")
+        model.train(False)
+
+        def predict_fn(home_team, away_team):
+            now = datetime.now()
+            home_stats = builder._compute_team_stats(home_team.id, now)
+            away_stats = builder._compute_team_stats(away_team.id, now)
+            if home_stats is None or away_stats is None:
+                return None
+            is_local = builder._is_local_derby(home_team.id, away_team.id)
+            log5 = builder._log5_prob(home_stats.win_rate, away_stats.win_rate)
+            features = MatchFeatures(
+                win_rate_diff=home_stats.win_rate - away_stats.win_rate,
+                margin_diff=home_stats.margin_avg - away_stats.margin_avg,
+                pythagorean_diff=home_stats.pythagorean - away_stats.pythagorean,
+                log5=log5,
+                is_local=1.0 if is_local else 0.0,
+                home_win_rate=home_stats.win_rate,
+                home_margin_avg=home_stats.margin_avg,
+                home_pythagorean=home_stats.pythagorean,
+                home_pf_avg=home_stats.pf_avg,
+                home_pa_avg=home_stats.pa_avg,
+                away_win_rate=away_stats.win_rate,
+                away_margin_avg=away_stats.margin_avg,
+                away_pythagorean=away_stats.pythagorean,
+                away_pf_avg=away_stats.pf_avg,
+                away_pa_avg=away_stats.pa_avg,
+                home_elo=home_stats.elo,
+                away_elo=away_stats.elo,
+                elo_diff=home_stats.elo - away_stats.elo,
+                home_streak=home_stats.streak / 5.0,
+                away_streak=away_stats.streak / 5.0,
+                home_last5_win_rate=home_stats.last_5_wins / 5.0,
+                away_last5_win_rate=away_stats.last_5_wins / 5.0,
+            )
+            X = features.to_array().reshape(1, -1)
+            X_norm = normalizer.transform(X)
+            X_t = torch.tensor(X_norm, dtype=torch.float32)
+            with torch.no_grad():
+                preds = model.predict(X_t)
+            return preds["win_prob"].item(), preds["margin"].item()
+
+    # Find DB teams and predict
+    def find_db_team(name):
+        for t in teams.values():
+            if t.name.lower() == name.lower():
+                return t
+        for t in teams.values():
+            if name.lower() in t.name.lower() or t.name.lower() in name.lower():
+                return t
+        return None
+
+    results = []
+    for fixture in raw_fixtures:
+        home_team = find_db_team(fixture.home_team.name)
+        away_team = find_db_team(fixture.away_team.name)
+
+        if not home_team:
+            if not output_json:
+                print(f"  Warning: Unknown team '{fixture.home_team.name}'")
+            continue
+        if not away_team:
+            if not output_json:
+                print(f"  Warning: Unknown team '{fixture.away_team.name}'")
+            continue
+
+        pred = predict_fn(home_team, away_team)
+        if pred is None:
+            if not output_json:
+                print(f"  Warning: Insufficient history for {home_team.name} vs {away_team.name}")
+            continue
+
+        win_prob, margin = pred
+        results.append({
+            "date": fixture.date.isoformat(),
+            "round": fixture.round,
+            "home": home_team.name,
+            "away": away_team.name,
+            "venue": fixture.venue,
+            "home_win_prob": win_prob,
+            "margin": round(margin),
+        })
+
+    if not results:
+        print("Could not make any predictions.")
+        return
+
+    # Output
+    if output_json:
+        print(json.dumps(results, indent=2))
+    elif output_csv:
+        print("date,round,home,away,home_win_prob,margin")
+        for r in results:
+            print(f"{r['date']},{r['round']},{r['home']},{r['away']},"
+                  f"{r['home_win_prob']:.3f},{r['margin']}")
+    else:
+        for r in results:
+            winner = r["home"] if r["home_win_prob"] >= 0.5 else r["away"]
+            prob = r["home_win_prob"] if r["home_win_prob"] >= 0.5 else 1 - r["home_win_prob"]
+            margin_abs = abs(r["margin"])
+            print(f"  {r['date']}  {r['home']:>15} vs {r['away']:<15}")
+            print(f"           → {winner} by {margin_abs} pts ({prob:.1%})\n")
 
 
 def cmd_model_info(args, config: Config):

@@ -1,5 +1,7 @@
 """Training and evaluation functions."""
 
+import random
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -547,23 +549,33 @@ def evaluate_match_predictor(
 class SequenceDataset(Dataset):
     """Dataset for sequence models."""
 
-    def __init__(self, samples: List[SequenceDataSample]):
+    def __init__(self, samples: List[SequenceDataSample], augment: bool = False):
         self.samples = samples
+        self.augment = augment
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        # Margin is absolute points difference
         margin = abs(s.home_score - s.away_score)
+        home_win = 1.0 if s.home_win else 0.0
+
+        if self.augment and random.random() < 0.5:
+            # Swap home/away and flip the label
+            return {
+                'home_history': torch.tensor(s.away_history, dtype=torch.float32),
+                'away_history': torch.tensor(s.home_history, dtype=torch.float32),
+                'comparison': torch.tensor(-s.comparison, dtype=torch.float32),
+                'home_win': torch.tensor(1.0 - home_win, dtype=torch.float32),
+                'margin': torch.tensor(margin, dtype=torch.float32),
+            }
+
         return {
             'home_history': torch.tensor(s.home_history, dtype=torch.float32),
             'away_history': torch.tensor(s.away_history, dtype=torch.float32),
             'comparison': torch.tensor(s.comparison, dtype=torch.float32),
-            'home_team_id': torch.tensor(s.home_team_id, dtype=torch.long),
-            'away_team_id': torch.tensor(s.away_team_id, dtype=torch.long),
-            'home_win': torch.tensor(1.0 if s.home_win else 0.0, dtype=torch.float32),
+            'home_win': torch.tensor(home_win, dtype=torch.float32),
             'margin': torch.tensor(margin, dtype=torch.float32),
         }
 
@@ -579,6 +591,8 @@ def train_sequence_model(
     margin_weight: float = 0.1,
     use_team_ids: bool = False,
     weight_decay: float = 0.0,
+    label_smoothing: float = 0.0,
+    augment_swap: bool = False,
     verbose: bool = True,
 ) -> Tuple[nn.Module, Dict]:
     """
@@ -595,21 +609,24 @@ def train_sequence_model(
         margin_weight: Weight for margin prediction loss
         use_team_ids: Whether to pass team IDs to the model
         weight_decay: L2 regularization strength
+        label_smoothing: Smooth hard 0/1 targets toward 0.5 (0.0 = off)
+        augment_swap: Randomly swap home/away during training
         verbose: Print progress
 
     Returns:
         Trained model and training history
     """
-    train_dataset = SequenceDataset(train_samples)
+    train_dataset = SequenceDataset(train_samples, augment=augment_swap)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     if val_samples:
         val_dataset = SequenceDataset(val_samples)
         val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=10, min_lr=1e-5
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    steps_per_epoch = (len(train_samples) + batch_size - 1) // batch_size
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=steps_per_epoch
     )
 
     # Loss functions
@@ -623,6 +640,7 @@ def train_sequence_model(
         'val_margin_mae': [],
     }
 
+    best_val_loss = float('inf')
     best_val_acc = 0
     best_model_state = None
 
@@ -652,15 +670,18 @@ def train_sequence_model(
                     batch['comparison'],
                 )
 
-            # Loss
-            win_loss = bce_loss(win_logit.squeeze(), batch['home_win'])
+            # Label smoothing: shift targets toward 0.5
+            smooth_target = batch['home_win'] * (1 - label_smoothing) + 0.5 * label_smoothing
+            win_loss = bce_loss(win_logit.squeeze(), smooth_target)
             margin_loss = nn.functional.huber_loss(
                 margin_pred.squeeze(), batch['margin'], delta=10.0
             )
             loss = win_weight * win_loss + margin_weight * margin_loss
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
 
             train_loss += loss.item() * len(batch['home_win'])
             preds = (torch.sigmoid(win_logit.squeeze()) >= 0.5).float()
@@ -697,7 +718,7 @@ def train_sequence_model(
                             batch['comparison'],
                         )
 
-                    # Loss
+                    # Use unsmoothed targets for validation loss
                     win_loss = bce_loss(win_logit.squeeze(), batch['home_win'])
                     margin_loss = nn.functional.huber_loss(
                         margin_pred.squeeze(), batch['margin'], delta=10.0
@@ -719,9 +740,9 @@ def train_sequence_model(
             history['val_acc'].append(val_acc)
             history['val_margin_mae'].append(val_margin_mae)
 
-            scheduler.step(val_acc)
-
-            if val_acc > best_val_acc:
+            # Track best model by val_loss (more stable than val_acc on small val sets)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 best_val_acc = val_acc
                 best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
 
@@ -738,6 +759,7 @@ def train_sequence_model(
         model.load_state_dict(best_model_state)
 
     history['best_val_acc'] = best_val_acc
+    history['best_val_loss'] = best_val_loss
     return model, history
 
 

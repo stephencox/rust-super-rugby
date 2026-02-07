@@ -1,0 +1,22 @@
+[training]
+epochs = 200
+batch_size = 64
+learning_rate = 0.00085
+weight_decay = 0.0001
+dropout = 0.2
+early_stopping_patience = 20
+
+[model]
+d_model = 128
+n_encoder_layers = 4
+n_cross_attn_layers = 2
+n_heads = 8
+max_history = 16
+
+[loss]
+win_weight = 1.0
+score_weight = 0.5
+
+[data]
+database_path = "data/sixnations.db"
+model_path = "model/sixnations_model"

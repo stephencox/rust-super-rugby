@@ -295,6 +295,12 @@ class SequenceLSTM(nn.Module):
             dropout=dropout if num_layers > 1 else 0,
         )
 
+        # Encourage remembering by default (Jozefowicz et al., 2015)
+        for name, param in self.lstm.named_parameters():
+            if 'bias' in name:
+                n = param.size(0)
+                param.data[n // 4 : n // 2].fill_(1.0)  # forget gate bias
+
         # Temporal attention over LSTM timestep outputs
         self.attn_fc = nn.Linear(hidden_size, hidden_size)
         self.attn_score = nn.Linear(hidden_size, 1)
