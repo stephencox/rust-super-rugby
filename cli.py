@@ -101,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     lstm_p.add_argument("--epochs", type=int, default=None, help="Number of epochs")
     lstm_p.add_argument("--lr", type=float, default=None, help="Learning rate")
     lstm_p.add_argument("--hidden-size", type=int, default=64, help="LSTM hidden size")
+    lstm_p.add_argument("--production", action="store_true",
+                         help="Train on all data (no validation split)")
 
     # --- tune ---
     tune_mlp_p = sub.add_parser("tune-mlp", help="Hyperparameter search for MLP")
@@ -415,8 +417,12 @@ def cmd_train_lstm(args, config: Config):
 
     print(f"  Loaded {stats['match_count']} matches, {stats['team_count']} teams")
 
-    train_cutoff = datetime(2023, 1, 1)
-    val_cutoff = datetime(2024, 1, 1)
+    if args.production:
+        train_cutoff = datetime(2099, 1, 1)
+        val_cutoff = datetime(2099, 1, 1)
+    else:
+        train_cutoff = datetime(2023, 1, 1)
+        val_cutoff = datetime(2024, 1, 1)
 
     print("\n[2/5] Building sequence features...")
     builder = SequenceFeatureBuilder(matches, teams, seq_len=config.model.max_history)
@@ -456,9 +462,10 @@ def cmd_train_lstm(args, config: Config):
 
     print(f"\n  Best validation accuracy: {history['best_val_acc']:.1%}")
 
-    eval_results = evaluate_sequence_model(model, val_samples)
-    print(f"  Win Accuracy: {eval_results['accuracy']:.1%}")
-    print(f"  Margin MAE: {eval_results['margin_mae']:.1f} points")
+    if val_samples:
+        eval_results = evaluate_sequence_model(model, val_samples)
+        print(f"  Win Accuracy: {eval_results['accuracy']:.1%}")
+        print(f"  Margin MAE: {eval_results['margin_mae']:.1f} points")
 
     MODEL_DIR.mkdir(exist_ok=True)
     model.save(MODEL_DIR / "lstm_model.pt")
