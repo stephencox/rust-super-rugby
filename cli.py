@@ -53,8 +53,19 @@ log = logging.getLogger(__name__)
 
 # Paths relative to project root
 PROJECT_ROOT = Path(__file__).parent
-MODEL_DIR = PROJECT_ROOT / "model"
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+
+
+def model_prefix(config: Config) -> Path:
+    """Resolve config.data.model_path to an absolute path prefix.
+
+    e.g. "model/rugby_model" -> /abs/path/model/rugby_model
+    Used as: model_prefix(config).with_name("rugby_model_mlp.pt")
+    """
+    p = Path(config.data.model_path)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return p
 
 # Timezone offsets by country (for team creation during sync)
 TIMEZONE_OFFSETS = {
@@ -410,10 +421,11 @@ def cmd_train(args, config: Config):
         print(f"  Win Accuracy: {eval_results['win_accuracy']:.1%}")
         print(f"  Margin MAE: {eval_results['margin_mae']:.1f} points")
 
-    MODEL_DIR.mkdir(exist_ok=True)
-    model.save(MODEL_DIR / "match_predictor.pt")
-    np.savez(MODEL_DIR / "normalizer.npz", mean=normalizer.mean, std=normalizer.std)
-    print(f"\nModel saved to {MODEL_DIR}")
+    prefix = model_prefix(config)
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    model.save(f"{prefix}_mlp.pt")
+    np.savez(f"{prefix}_mlp_norm.npz", mean=normalizer.mean, std=normalizer.std)
+    print(f"\nModel saved to {prefix}_mlp.pt")
 
 
 def cmd_train_lstm(args, config: Config):
@@ -487,10 +499,11 @@ def cmd_train_lstm(args, config: Config):
         print(f"  Win Accuracy: {eval_results['accuracy']:.1%}")
         print(f"  Margin MAE: {eval_results['margin_mae']:.1f} points")
 
-    MODEL_DIR.mkdir(exist_ok=True)
-    model.save(MODEL_DIR / "lstm_model.pt")
-    normalizer.save(str(MODEL_DIR / "lstm_normalizer.npz"))
-    print(f"\nModel saved to {MODEL_DIR}")
+    prefix = model_prefix(config)
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    model.save(f"{prefix}_lstm.pt")
+    normalizer.save(f"{prefix}_lstm_norm.npz")
+    print(f"\nModel saved to {prefix}_lstm.pt")
 
 
 def cmd_tune_mlp(args, config: Config):
@@ -626,12 +639,14 @@ def cmd_predict(args, config: Config):
         print(f"Error: Unknown team '{args.away}'")
         sys.exit(1)
 
+    prefix = model_prefix(config)
+
     if args.model == "lstm":
         builder = SequenceFeatureBuilder(matches, teams, seq_len=10)
         for match in sorted(matches, key=lambda m: m.date):
             builder.process_match(match)
 
-        norm_data = np.load(MODEL_DIR / "lstm_normalizer.npz")
+        norm_data = np.load(f"{prefix}_lstm_norm.npz")
         normalizer = SequenceNormalizer()
         normalizer.seq_mean = norm_data["seq_mean"]
         normalizer.seq_std = norm_data["seq_std"]
@@ -640,7 +655,7 @@ def cmd_predict(args, config: Config):
 
         model = SequenceLSTM(input_dim=23, hidden_size=64, num_layers=1,
                              comparison_dim=50, dropout=0.3)
-        model.load(MODEL_DIR / "lstm_model.pt")
+        model.load(f"{prefix}_lstm.pt")
         model.train(False)
 
         now = datetime.now()
@@ -670,13 +685,13 @@ def cmd_predict(args, config: Config):
             builder.build_features(match)
             builder.process_match(match)
 
-        norm_data = np.load(MODEL_DIR / "normalizer.npz")
+        norm_data = np.load(f"{prefix}_mlp_norm.npz")
         normalizer = FeatureNormalizer()
         normalizer.mean = norm_data["mean"]
         normalizer.std = norm_data["std"]
 
         model = MatchPredictor(len(normalizer.mean), hidden_dims=[64])
-        model.load(MODEL_DIR / "match_predictor.pt")
+        model.load(f"{prefix}_mlp.pt")
         model.train(False)
 
         now = datetime.now()
@@ -772,6 +787,8 @@ def cmd_predict_next(args, config: Config):
         teams = db.get_teams()
 
     # Build features and load model
+    prefix = model_prefix(config)
+
     if args.model == "lstm":
         if not output_json and not output_csv:
             print("Loading LSTM model...")
@@ -779,7 +796,7 @@ def cmd_predict_next(args, config: Config):
         for match in sorted(matches, key=lambda m: m.date):
             builder.process_match(match)
 
-        norm_data = np.load(MODEL_DIR / "lstm_normalizer.npz")
+        norm_data = np.load(f"{prefix}_lstm_norm.npz")
         normalizer = SequenceNormalizer()
         normalizer.seq_mean = norm_data["seq_mean"]
         normalizer.seq_std = norm_data["seq_std"]
@@ -788,7 +805,7 @@ def cmd_predict_next(args, config: Config):
 
         model = SequenceLSTM(input_dim=23, hidden_size=64, num_layers=1,
                              comparison_dim=50, dropout=0.3)
-        model.load(MODEL_DIR / "lstm_model.pt")
+        model.load(f"{prefix}_lstm.pt")
         model.train(False)
 
         def predict_fn(home_team, away_team):
@@ -816,13 +833,13 @@ def cmd_predict_next(args, config: Config):
             builder.build_features(match)
             builder.process_match(match)
 
-        norm_data = np.load(MODEL_DIR / "normalizer.npz")
+        norm_data = np.load(f"{prefix}_mlp_norm.npz")
         normalizer = FeatureNormalizer()
         normalizer.mean = norm_data["mean"]
         normalizer.std = norm_data["std"]
 
         model = MatchPredictor(len(normalizer.mean), hidden_dims=[64])
-        model.load(MODEL_DIR / "match_predictor.pt")
+        model.load(f"{prefix}_mlp.pt")
         model.train(False)
 
         def predict_fn(home_team, away_team):
@@ -928,23 +945,27 @@ def cmd_predict_next(args, config: Config):
 
 def cmd_model_info(args, config: Config):
     """Show model information."""
-    print("Model files:")
-    if not MODEL_DIR.exists():
+    prefix = model_prefix(config)
+    model_dir = prefix.parent
+    print(f"Model files ({prefix.name}_*):")
+    if not model_dir.exists():
         print("  No model directory found.")
         return
 
-    for f in sorted(MODEL_DIR.iterdir()):
-        size_kb = f.stat().st_size / 1024
-        print(f"  {f.name:<30} {size_kb:>8.1f} KB")
+    for f in sorted(model_dir.iterdir()):
+        if f.name.startswith(prefix.name):
+            size_kb = f.stat().st_size / 1024
+            print(f"  {f.name:<40} {size_kb:>8.1f} KB")
 
 
 def cmd_model_validate(args, config: Config):
     """Validate saved models can be loaded."""
+    prefix = model_prefix(config)
     errors = []
 
     # MLP
-    mlp_path = MODEL_DIR / "match_predictor.pt"
-    norm_path = MODEL_DIR / "normalizer.npz"
+    mlp_path = Path(f"{prefix}_mlp.pt")
+    norm_path = Path(f"{prefix}_mlp_norm.npz")
     if mlp_path.exists() and norm_path.exists():
         try:
             norm_data = np.load(norm_path)
@@ -961,8 +982,8 @@ def cmd_model_validate(args, config: Config):
         print("  MLP model: not found")
 
     # LSTM
-    lstm_path = MODEL_DIR / "lstm_model.pt"
-    lstm_norm_path = MODEL_DIR / "lstm_normalizer.npz"
+    lstm_path = Path(f"{prefix}_lstm.pt")
+    lstm_norm_path = Path(f"{prefix}_lstm_norm.npz")
     if lstm_path.exists() and lstm_norm_path.exists():
         try:
             norm_data = np.load(lstm_norm_path)
