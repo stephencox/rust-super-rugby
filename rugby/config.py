@@ -3,7 +3,6 @@
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -41,6 +40,7 @@ class LossConfig:
 
 @dataclass
 class DataConfig:
+    competition: str = "super-rugby"
     database_path: str = "data/rugby.db"
     model_path: str = "model/rugby_model"
 
@@ -53,15 +53,27 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
 
     @classmethod
-    def load(cls, path: Path) -> "Config":
-        """Load configuration from a TOML file."""
+    def load(cls, path: Path, competition: str = "super-rugby") -> "Config":
+        """Load configuration for a competition from a TOML file.
+
+        The file is keyed by competition name, e.g. [super-rugby.training].
+        """
         with open(path, "rb") as f:
             raw = tomllib.load(f)
 
-        config = cls()
+        if competition not in raw:
+            available = [k for k in raw if isinstance(raw[k], dict)]
+            raise ValueError(
+                f"Unknown competition '{competition}'. "
+                f"Available: {', '.join(available)}"
+            )
 
-        if "training" in raw:
-            t = raw["training"]
+        section = raw[competition]
+        config = cls()
+        config.data.competition = competition
+
+        if "training" in section:
+            t = section["training"]
             config.training = TrainingConfig(
                 epochs=t.get("epochs", config.training.epochs),
                 batch_size=t.get("batch_size", config.training.batch_size),
@@ -71,8 +83,8 @@ class Config:
                 early_stopping_patience=t.get("early_stopping_patience", config.training.early_stopping_patience),
             )
 
-        if "model" in raw:
-            m = raw["model"]
+        if "model" in section:
+            m = section["model"]
             config.model = ModelConfig(
                 d_model=m.get("d_model", config.model.d_model),
                 n_encoder_layers=m.get("n_encoder_layers", config.model.n_encoder_layers),
@@ -81,16 +93,17 @@ class Config:
                 max_history=m.get("max_history", config.model.max_history),
             )
 
-        if "loss" in raw:
-            lo = raw["loss"]
+        if "loss" in section:
+            lo = section["loss"]
             config.loss = LossConfig(
                 win_weight=lo.get("win_weight", config.loss.win_weight),
                 score_weight=lo.get("score_weight", config.loss.score_weight),
             )
 
-        if "data" in raw:
-            d = raw["data"]
+        if "data" in section:
+            d = section["data"]
             config.data = DataConfig(
+                competition=competition,
                 database_path=d.get("database_path", config.data.database_path),
                 model_path=d.get("model_path", config.data.model_path),
             )

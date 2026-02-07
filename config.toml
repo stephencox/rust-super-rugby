@@ -1,4 +1,4 @@
-[training]
+[super-rugby.training]
 epochs = 200
 batch_size = 32
 learning_rate = 0.0005
@@ -6,17 +6,40 @@ weight_decay = 0.001
 dropout = 0.3
 early_stopping_patience = 50
 
-[model]
+[super-rugby.model]
 d_model = 64
 n_encoder_layers = 2
 n_cross_attn_layers = 1
 n_heads = 4
 max_history = 10
 
-[loss]
+[super-rugby.loss]
 win_weight = 2.0
 score_weight = 0.3
 
-[data]
+[super-rugby.data]
 database_path = "data/rugby.db"
 model_path = "model/rugby_model"
+
+[sixnations.training]
+epochs = 200
+batch_size = 64
+learning_rate = 0.00085
+weight_decay = 0.0001
+dropout = 0.2
+early_stopping_patience = 20
+
+[sixnations.model]
+d_model = 128
+n_encoder_layers = 4
+n_cross_attn_layers = 2
+n_heads = 8
+max_history = 16
+
+[sixnations.loss]
+win_weight = 1.0
+score_weight = 0.5
+
+[sixnations.data]
+database_path = "data/sixnations.db"
+model_path = "model/sixnations_model"

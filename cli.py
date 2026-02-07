@@ -2,7 +2,7 @@
 """Unified CLI for rugby prediction system.
 
 Usage:
-    python cli.py [--config CONFIG] [--verbose] <command> [args...]
+    python cli.py [--competition COMP] [--verbose] <command> [args...]
 
 Commands:
     data sync       Scrape Wikipedia and populate database
@@ -78,6 +78,8 @@ TIMEZONE_OFFSETS = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rugby", description="Rugby match prediction CLI")
+    parser.add_argument("--competition", "-c", type=str, default="super-rugby",
+                        help="Competition name (default: super-rugby)")
     parser.add_argument("--config", type=str, default=None, help="Path to TOML config file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
 
@@ -88,9 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
     data_sub = data_parser.add_subparsers(dest="data_command")
 
     sync_p = data_sub.add_parser("sync", help="Scrape Wikipedia and populate database")
-    sync_p.add_argument("--source", default="super-rugby",
-                        choices=["super-rugby", "sixnations"],
-                        help="Data source (default: super-rugby)")
     sync_p.add_argument("--cache", type=str, default=None, help="Cache directory")
     sync_p.add_argument("--offline", action="store_true", help="Use cached data only")
 
@@ -99,9 +98,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     fixtures_p = data_sub.add_parser("fixtures", help="Fetch upcoming fixtures for a year")
     fixtures_p.add_argument("year", type=int, help="Season year")
-    fixtures_p.add_argument("--source", default="super-rugby",
-                            choices=["super-rugby", "sixnations"],
-                            help="Data source (default: super-rugby)")
 
     data_sub.add_parser("status", help="Show database statistics")
 
@@ -142,9 +138,6 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Output format")
     pn_p.add_argument("--model", choices=["mlp", "lstm"], default="mlp",
                       help="Model to use (default: mlp)")
-    pn_p.add_argument("--source", default="super-rugby",
-                      choices=["super-rugby", "sixnations"],
-                      help="Fixture source (default: super-rugby)")
 
     # --- model ---
     model_parser = sub.add_parser("model", help="Model management commands")
@@ -159,12 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_config(args) -> Config:
-    if args.config:
-        return Config.load(Path(args.config))
-    # Try default config.toml
-    default_path = PROJECT_ROOT / "config.toml"
-    if default_path.exists():
-        return Config.load(default_path)
+    config_path = Path(args.config) if args.config else PROJECT_ROOT / "config.toml"
+    if config_path.exists():
+        return Config.load(config_path, competition=args.competition)
     return Config.default()
 
 
@@ -214,7 +204,7 @@ def cmd_data_sync(args, config: Config):
 
     cache = HttpCache(cache_dir, offline=args.offline)
 
-    if args.source == "sixnations":
+    if config.data.competition == "sixnations":
         scraper = SixNationsScraper(cache)
         start_year = 2000
         label = "Six Nations"
@@ -317,7 +307,7 @@ def cmd_data_fixtures(args, config: Config):
     """Fetch upcoming fixtures for a year."""
     cache = HttpCache(CACHE_DIR)
 
-    if args.source == "sixnations":
+    if config.data.competition == "sixnations":
         scraper = SixNationsScraper(cache)
         label = "Six Nations"
     else:
@@ -759,7 +749,7 @@ def cmd_predict_next(args, config: Config):
 
     # Fetch fixtures
     cache = HttpCache(CACHE_DIR)
-    if args.source == "sixnations":
+    if config.data.competition == "sixnations":
         scraper = SixNationsScraper(cache)
     else:
         scraper = WikipediaScraper(cache)
