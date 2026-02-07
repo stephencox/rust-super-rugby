@@ -142,6 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Output format")
     pn_p.add_argument("--model", choices=["mlp", "lstm"], default="mlp",
                       help="Model to use (default: mlp)")
+    pn_p.add_argument("--source", default="super-rugby",
+                      choices=["super-rugby", "sixnations"],
+                      help="Fixture source (default: super-rugby)")
 
     # --- model ---
     model_parser = sub.add_parser("model", help="Model management commands")
@@ -756,7 +759,10 @@ def cmd_predict_next(args, config: Config):
 
     # Fetch fixtures
     cache = HttpCache(CACHE_DIR)
-    scraper = WikipediaScraper(cache)
+    if args.source == "sixnations":
+        scraper = SixNationsScraper(cache)
+    else:
+        scraper = WikipediaScraper(cache)
 
     raw_fixtures = scraper.fetch_fixtures(args.year)
     if not raw_fixtures:
