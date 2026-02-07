@@ -246,16 +246,10 @@ class WikipediaScraper:
         elif 2006 <= year <= 2010:
             return [f"{base}{year}_Super_14_season"]
         elif 2011 <= year <= 2021:
-            return [
-                f"{base}{year}_Super_Rugby_season",
-                f"{base}List_of_{year}_Super_Rugby_matches",
-            ]
+            return [f"{base}{year}_Super_Rugby_season"]
         else:
             # 2022+ Super Rugby Pacific
-            return [
-                f"{base}{year}_Super_Rugby_Pacific_season",
-                f"{base}List_of_{year}_Super_Rugby_Pacific_matches",
-            ]
+            return [f"{base}{year}_Super_Rugby_Pacific_season"]
 
     def fetch_season(self, year: int) -> List[RawMatch]:
         """Fetch and parse all matches for a season."""
