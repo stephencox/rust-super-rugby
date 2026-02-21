@@ -1,10 +1,10 @@
 [super-rugby.training]
-epochs = 200
+epochs = 296
 batch_size = 32
-learning_rate = 0.0005
+learning_rate = 0.056
 weight_decay = 0.001
-dropout = 0.3
-early_stopping_patience = 50
+dropout = 0.41
+early_stopping_patience = 30
 
 [super-rugby.model]
 d_model = 64
@@ -12,6 +12,7 @@ n_encoder_layers = 2
 n_cross_attn_layers = 1
 n_heads = 4
 max_history = 10
+hidden_dims = [128, 64]
 
 [super-rugby.loss]
 win_weight = 2.0
@@ -35,6 +36,7 @@ n_encoder_layers = 4
 n_cross_attn_layers = 2
 n_heads = 8
 max_history = 16
+hidden_dims = [128, 64]
 
 [sixnations.loss]
 win_weight = 1.0
