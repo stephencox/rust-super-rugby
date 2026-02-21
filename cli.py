@@ -421,6 +421,7 @@ def cmd_train(args, config: Config):
     win_model, win_history = train_win_model(
         X_train_norm, y_win_train,
         X_val_norm, y_win_val,
+        label_smoothing=0.05,
         **train_kwargs,
     )
     print(f"\n  Best validation accuracy: {win_history['best_val_acc']:.1%}")

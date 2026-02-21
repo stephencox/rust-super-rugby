@@ -60,6 +60,10 @@ class MatchFeatures:
     home_last5_win_rate: float = 0.0
     away_last5_win_rate: float = 0.0
 
+    # Head-to-head features (2) — from home team's perspective
+    h2h_win_rate: float = 0.5
+    h2h_margin_avg: float = 0.0
+
     def to_array(self) -> np.ndarray:
         """Convert to numpy array."""
         return np.array([
@@ -90,6 +94,9 @@ class MatchFeatures:
             self.away_streak,
             self.home_last5_win_rate,
             self.away_last5_win_rate,
+            # H2H (2)
+            self.h2h_win_rate,
+            self.h2h_margin_avg,
         ], dtype=np.float32)
 
     @staticmethod
@@ -101,11 +108,12 @@ class MatchFeatures:
             'away_win_rate', 'away_margin_avg', 'away_pythagorean', 'away_pf_avg', 'away_pa_avg',
             'home_elo', 'away_elo', 'elo_diff',
             'home_streak', 'away_streak', 'home_last5_win_rate', 'away_last5_win_rate',
+            'h2h_win_rate', 'h2h_margin_avg',
         ]
 
     @staticmethod
     def num_features() -> int:
-        return 22
+        return 24
 
 
 class FeatureBuilder:
@@ -222,6 +230,34 @@ class FeatureBuilder:
             return home_team.country == away_team.country
         return False
 
+    def _compute_h2h_stats(self, home_id: int, away_id: int, before_date: datetime) -> Tuple[float, float]:
+        """Compute head-to-head stats from home team's perspective.
+
+        Returns (win_rate, margin_avg) from home_id's perspective against away_id.
+        Uses all available H2H history (not limited to max_history).
+        """
+        h2h_matches = [
+            m for m in self.team_history[home_id]
+            if m.date < before_date and (m.home_team_id == away_id or m.away_team_id == away_id)
+        ]
+
+        if not h2h_matches:
+            return 0.5, 0.0
+
+        wins = 0
+        total_margin = 0
+        for m in h2h_matches:
+            if m.home_team_id == home_id:
+                pf, pa = m.home_score, m.away_score
+            else:
+                pf, pa = m.away_score, m.home_score
+            if pf > pa:
+                wins += 1
+            total_margin += (pf - pa)
+
+        n = len(h2h_matches)
+        return wins / n, total_margin / n
+
     def build_features(self, match: Match) -> Optional[MatchFeatures]:
         """Build features for a match (using only data available before the match)."""
         home_stats = self._compute_team_stats(match.home_team_id, match.date)
@@ -232,6 +268,9 @@ class FeatureBuilder:
 
         is_local = self._is_local_derby(match.home_team_id, match.away_team_id)
         log5 = self._log5_prob(home_stats.win_rate, away_stats.win_rate)
+        h2h_win_rate, h2h_margin_avg = self._compute_h2h_stats(
+            match.home_team_id, match.away_team_id, match.date
+        )
 
         return MatchFeatures(
             # Differentials
@@ -261,6 +300,9 @@ class FeatureBuilder:
             away_streak=away_stats.streak / 5.0,
             home_last5_win_rate=home_stats.last_5_wins / 5.0,
             away_last5_win_rate=away_stats.last_5_wins / 5.0,
+            # H2H
+            h2h_win_rate=h2h_win_rate,
+            h2h_margin_avg=h2h_margin_avg,
         )
 
     def process_match(self, match: Match):

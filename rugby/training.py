@@ -12,13 +12,15 @@ from .models import WinClassifier, MarginRegressor, SequenceLSTM
 from .features import SequenceDataSample
 
 
-# Feature indices for home/away augmentation (22-dim MatchFeatures)
+# Feature indices for home/away augmentation (24-dim MatchFeatures)
 # Indices 0-3: differentials (negate)
 # Index 4: is_local (symmetric, keep)
 # Indices 5-9: home stats, 10-14: away stats (swap)
 # Indices 15-16: home_elo/away_elo (swap), 17: elo_diff (negate)
 # Indices 18-19: home form, 20-21: away form (swap)
-_NEGATE_INDICES = [0, 1, 2, 3, 17]
+# Index 22: h2h_win_rate (flip: 1-x), 23: h2h_margin_avg (negate)
+_NEGATE_INDICES = [0, 1, 2, 3, 17, 23]
+_FLIP_INDICES = [22]  # x -> 1 - x
 _SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
                (15, 16), (18, 20), (19, 21)]
 
@@ -53,6 +55,9 @@ class MLPDataset(Dataset):
             # Negate differentials
             for i in _NEGATE_INDICES:
                 x[i] = -x[i]
+            # Flip probabilities (x -> 1 - x)
+            for i in _FLIP_INDICES:
+                x[i] = 1.0 - x[i]
             # Swap home/away stats
             for h, a in _SWAP_PAIRS:
                 x[h], x[a] = x[a].clone(), x[h].clone()
@@ -86,6 +91,7 @@ def train_win_model(
     away_team_ids: Optional[np.ndarray] = None,
     num_teams: int = 0,
     team_embed_dim: int = 8,
+    label_smoothing: float = 0.0,
     verbose: bool = True,
 ) -> Tuple[WinClassifier, Dict]:
     """
@@ -141,13 +147,16 @@ def train_win_model(
                 logits = model(X_batch, batch['home_team_id'], batch['away_team_id'])
             else:
                 logits = model(X_batch)
-            loss = criterion(logits, y_batch)
+            # Label smoothing: shift targets toward 0.5
+            smooth_target = y_batch * (1 - label_smoothing) + 0.5 * label_smoothing
+            loss = criterion(logits, smooth_target)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
 
             train_loss += loss.item() * len(X_batch)
+            # Accuracy computed against original (unsmoothed) labels
             preds = (torch.sigmoid(logits) >= 0.5).float()
             train_correct += (preds == y_batch).sum().item()
             train_total += len(X_batch)
@@ -157,7 +166,7 @@ def train_win_model(
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
 
-        # Validation
+        # Validation (uses unsmoothed targets)
         if X_val is not None:
             model.train(False)
             with torch.no_grad():

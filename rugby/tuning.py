@@ -47,6 +47,7 @@ def tune_mlp(
             home_team_ids=home_team_ids,
             away_team_ids=away_team_ids,
             num_teams=num_teams,
+            label_smoothing=0.05,
             verbose=False,
         )
 

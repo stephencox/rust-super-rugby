@@ -7,6 +7,28 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 
+class ResidualBlock(nn.Module):
+    """A single residual MLP block: Linear -> [BN] -> ReLU -> [Dropout] + skip."""
+
+    def __init__(self, in_dim: int, out_dim: int, dropout: float = 0.0,
+                 use_batchnorm: bool = False):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.bn = nn.BatchNorm1d(out_dim) if use_batchnorm else None
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else None
+        self.proj = nn.Linear(in_dim, out_dim, bias=False) if in_dim != out_dim else None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = self.proj(x) if self.proj is not None else x
+        h = self.linear(x)
+        if self.bn is not None:
+            h = self.bn(h)
+        h = torch.relu(h)
+        if self.dropout is not None:
+            h = self.dropout(h)
+        return h + residual
+
+
 class WinClassifier(nn.Module):
     """
     MLP classifier for predicting match winner.
@@ -25,19 +47,27 @@ class WinClassifier(nn.Module):
             self.team_embedding = nn.Embedding(num_teams + 1, team_embed_dim, padding_idx=0)
             first_dim += 2 * team_embed_dim
 
-        layers = []
+        blocks = []
         prev_dim = first_dim
         for h_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h_dim))
-            if use_batchnorm:
-                layers.append(nn.BatchNorm1d(h_dim))
-            layers.append(nn.ReLU())
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
+            blocks.append(ResidualBlock(prev_dim, h_dim, dropout, use_batchnorm))
             prev_dim = h_dim
 
-        self.backbone = nn.Sequential(*layers)
+        self.backbone = nn.ModuleList(blocks)
         self.head = nn.Linear(prev_dim, 1)
+
+    def _embed_teams(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor],
+                     away_team_id: Optional[torch.Tensor]) -> torch.Tensor:
+        if self.num_teams > 0:
+            if home_team_id is not None and away_team_id is not None:
+                home_emb = self.team_embedding(home_team_id)
+                away_emb = self.team_embedding(away_team_id)
+            else:
+                zeros = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+                home_emb = self.team_embedding(zeros)
+                away_emb = self.team_embedding(zeros)
+            x = torch.cat([x, home_emb, away_emb], dim=1)
+        return x
 
     def forward(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
                 away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -52,17 +82,9 @@ class WinClassifier(nn.Module):
         Returns:
             Win logits [batch] (apply sigmoid for probability)
         """
-        if self.num_teams > 0:
-            if home_team_id is not None and away_team_id is not None:
-                home_emb = self.team_embedding(home_team_id)
-                away_emb = self.team_embedding(away_team_id)
-            else:
-                # Use padding (zeros) when no team IDs provided
-                zeros = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
-                home_emb = self.team_embedding(zeros)
-                away_emb = self.team_embedding(zeros)
-            x = torch.cat([x, home_emb, away_emb], dim=1)
-        h = self.backbone(x)
+        h = self._embed_teams(x, home_team_id, away_team_id)
+        for block in self.backbone:
+            h = block(h)
         return self.head(h).squeeze(-1)
 
     def predict_proba(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
@@ -107,19 +129,27 @@ class MarginRegressor(nn.Module):
             self.team_embedding = nn.Embedding(num_teams + 1, team_embed_dim, padding_idx=0)
             first_dim += 2 * team_embed_dim
 
-        layers = []
+        blocks = []
         prev_dim = first_dim
         for h_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h_dim))
-            if use_batchnorm:
-                layers.append(nn.BatchNorm1d(h_dim))
-            layers.append(nn.ReLU())
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
+            blocks.append(ResidualBlock(prev_dim, h_dim, dropout, use_batchnorm))
             prev_dim = h_dim
 
-        self.backbone = nn.Sequential(*layers)
+        self.backbone = nn.ModuleList(blocks)
         self.head = nn.Linear(prev_dim, 1)
+
+    def _embed_teams(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor],
+                     away_team_id: Optional[torch.Tensor]) -> torch.Tensor:
+        if self.num_teams > 0:
+            if home_team_id is not None and away_team_id is not None:
+                home_emb = self.team_embedding(home_team_id)
+                away_emb = self.team_embedding(away_team_id)
+            else:
+                zeros = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+                home_emb = self.team_embedding(zeros)
+                away_emb = self.team_embedding(zeros)
+            x = torch.cat([x, home_emb, away_emb], dim=1)
+        return x
 
     def forward(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
                 away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -134,16 +164,9 @@ class MarginRegressor(nn.Module):
         Returns:
             Predicted margin [batch] (always non-negative)
         """
-        if self.num_teams > 0:
-            if home_team_id is not None and away_team_id is not None:
-                home_emb = self.team_embedding(home_team_id)
-                away_emb = self.team_embedding(away_team_id)
-            else:
-                zeros = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
-                home_emb = self.team_embedding(zeros)
-                away_emb = self.team_embedding(zeros)
-            x = torch.cat([x, home_emb, away_emb], dim=1)
-        h = self.backbone(x)
+        h = self._embed_teams(x, home_team_id, away_team_id)
+        for block in self.backbone:
+            h = block(h)
         return torch.relu(self.head(h)).squeeze(-1)
 
     def predict(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
