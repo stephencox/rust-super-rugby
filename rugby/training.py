@@ -120,6 +120,7 @@ def train_win_model(
     num_teams: int = 0,
     team_embed_dim: int = 8,
     label_smoothing: float = 0.0,
+    log_dir: Optional[str] = None,
     verbose: bool = True,
 ) -> Tuple[WinClassifier, Dict]:
     """
@@ -128,6 +129,11 @@ def train_win_model(
     Returns:
         Trained model and training history
     """
+    writer = None
+    if log_dir:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=f"{log_dir}/win")
+
     if X_val is not None:
         X_val_t = torch.tensor(X_val, dtype=torch.float32)
         y_val_t = torch.tensor(y_val, dtype=torch.float32)
@@ -194,6 +200,11 @@ def train_win_model(
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
 
+        if writer:
+            writer.add_scalar('loss/train', train_loss, epoch)
+            writer.add_scalar('accuracy/train', train_acc, epoch)
+            writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+
         # Validation (uses unsmoothed targets)
         if X_val is not None:
             model.train(False)
@@ -205,6 +216,10 @@ def train_win_model(
 
             history['val_loss'].append(val_loss)
             history['val_acc'].append(val_acc)
+
+            if writer:
+                writer.add_scalar('loss/val', val_loss, epoch)
+                writer.add_scalar('accuracy/val', val_acc, epoch)
 
             if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
                 best_val_acc = val_acc
@@ -232,6 +247,9 @@ def train_win_model(
     if best_model_state:
         model.load_state_dict(best_model_state)
 
+    if writer:
+        writer.close()
+
     history['best_val_acc'] = best_val_acc
     return model, history
 
@@ -254,6 +272,7 @@ def train_margin_model(
     away_team_ids: Optional[np.ndarray] = None,
     num_teams: int = 0,
     team_embed_dim: int = 8,
+    log_dir: Optional[str] = None,
     verbose: bool = True,
 ) -> Tuple[MarginRegressor, Dict]:
     """
@@ -266,6 +285,11 @@ def train_margin_model(
     Returns:
         Trained model and training history
     """
+    writer = None
+    if log_dir:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=f"{log_dir}/margin")
+
     # Normalize margin targets so loss is on a comparable scale
     margin_scale = float(np.mean(y_margin_train)) if np.mean(y_margin_train) > 0 else 1.0
     y_margin_train_scaled = y_margin_train / margin_scale
@@ -335,6 +359,11 @@ def train_margin_model(
         history['train_loss'].append(train_loss)
         history['train_margin_mae'].append(train_margin_mae)
 
+        if writer:
+            writer.add_scalar('loss/train', train_loss, epoch)
+            writer.add_scalar('mae/train', train_margin_mae, epoch)
+            writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+
         # Validation
         if X_val is not None:
             model.train(False)
@@ -346,6 +375,10 @@ def train_margin_model(
 
             history['val_loss'].append(val_loss)
             history['val_margin_mae'].append(val_margin_mae)
+
+            if writer:
+                writer.add_scalar('loss/val', val_loss, epoch)
+                writer.add_scalar('mae/val', val_margin_mae, epoch)
 
             if val_margin_mae < best_val_mae or (val_margin_mae == best_val_mae and val_loss < best_val_loss):
                 best_val_mae = val_margin_mae
@@ -372,6 +405,9 @@ def train_margin_model(
     # Load best model
     if best_model_state:
         model.load_state_dict(best_model_state)
+
+    if writer:
+        writer.close()
 
     history['best_val_mae'] = best_val_mae
     history['margin_scale'] = margin_scale
@@ -509,6 +545,7 @@ def train_sequence_model(
     weight_decay: float = 0.0,
     label_smoothing: float = 0.0,
     augment_swap: bool = False,
+    log_dir: Optional[str] = None,
     verbose: bool = True,
 ) -> Tuple[nn.Module, Dict]:
     """
@@ -532,6 +569,11 @@ def train_sequence_model(
     Returns:
         Trained model and training history
     """
+    writer = None
+    if log_dir:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=f"{log_dir}/lstm")
+
     train_dataset = SequenceDataset(train_samples, augment=augment_swap)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -602,6 +644,11 @@ def train_sequence_model(
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
 
+        if writer:
+            writer.add_scalar('loss/train', train_loss, epoch)
+            writer.add_scalar('accuracy/train', train_acc, epoch)
+            writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+
         # Validation
         if val_samples:
             model.train(False)
@@ -642,6 +689,11 @@ def train_sequence_model(
             history['val_acc'].append(val_acc)
             history['val_margin_mae'].append(val_margin_mae)
 
+            if writer:
+                writer.add_scalar('loss/val', val_loss, epoch)
+                writer.add_scalar('accuracy/val', val_acc, epoch)
+                writer.add_scalar('margin_mae/val', val_margin_mae, epoch)
+
             # Track best model by val_loss (more stable than val_acc on small val sets)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -659,6 +711,9 @@ def train_sequence_model(
     # Load best model
     if best_model_state:
         model.load_state_dict(best_model_state)
+
+    if writer:
+        writer.close()
 
     history['best_val_acc'] = best_val_acc
     history['best_val_loss'] = best_val_loss

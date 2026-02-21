@@ -108,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--lr", type=float, default=None, help="Learning rate")
     train_p.add_argument("--production", action="store_true",
                          help="Train on all data (no validation split)")
+    train_p.add_argument("--tensorboard", type=str, default=None, metavar="DIR",
+                         help="Log training curves to TensorBoard (e.g. runs/mlp)")
 
     # --- train-lstm ---
     lstm_p = sub.add_parser("train-lstm", help="Train LSTM model")
@@ -116,6 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
     lstm_p.add_argument("--hidden-size", type=int, default=64, help="LSTM hidden size")
     lstm_p.add_argument("--production", action="store_true",
                          help="Train on all data (no validation split)")
+    lstm_p.add_argument("--tensorboard", type=str, default=None, metavar="DIR",
+                         help="Log training curves to TensorBoard (e.g. runs/lstm)")
 
     # --- tune ---
     tune_mlp_p = sub.add_parser("tune-mlp", help="Hyperparameter search for MLP")
@@ -418,11 +422,14 @@ def cmd_train(args, config: Config):
         num_teams=num_teams,
     )
 
+    log_dir = args.tensorboard
+
     print(f"\n[4/5] Training win classifier for {epochs} epochs, lr={lr}...")
     win_model, win_history = train_win_model(
         X_train_norm, y_win_train,
         X_val_norm, y_win_val,
         label_smoothing=0.05,
+        log_dir=log_dir,
         **train_kwargs,
     )
     print(f"\n  Best validation accuracy: {win_history['best_val_acc']:.1%}")
@@ -435,6 +442,7 @@ def cmd_train(args, config: Config):
     margin_model, margin_history = train_margin_model(
         X_train_norm, y_margin_train,
         X_val_norm, y_margin_val,
+        log_dir=log_dir,
         **train_kwargs,
     )
     margin_scale = margin_history.get('margin_scale', 1.0)
@@ -535,6 +543,7 @@ def cmd_train_lstm(args, config: Config):
         weight_decay=config.training.weight_decay,
         label_smoothing=0.05,
         augment_swap=True,
+        log_dir=args.tensorboard,
     )
 
     print(f"\n  Best validation accuracy: {history['best_val_acc']:.1%}")
