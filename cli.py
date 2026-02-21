@@ -521,10 +521,11 @@ def cmd_train_lstm(args, config: Config):
     train_samples = normalizer.fit_transform(train_samples)
     val_samples = normalizer.transform_samples(val_samples)
 
-    print(f"\n[4/5] Creating LSTM (hidden={hidden_size})...")
+    print(f"\n[4/5] Creating BiLSTM (hidden={hidden_size})...")
     model = SequenceLSTM(
         input_dim=23, hidden_size=hidden_size, num_layers=1,
         comparison_dim=50, dropout=config.training.dropout,
+        bidirectional=True,
     )
 
     print(f"\n[5/5] Training for {epochs} epochs, lr={lr}...")
@@ -558,6 +559,7 @@ def cmd_train_lstm(args, config: Config):
         'num_layers': 1,
         'comparison_dim': 50,
         'dropout': config.training.dropout,
+        'bidirectional': True,
     }
     lstm_path = f"{prefix}_lstm.pt"
     torch.save(checkpoint, lstm_path)
@@ -750,6 +752,7 @@ def load_lstm_checkpoint(prefix: Path, config: Config):
         num_layers=ckpt.get('num_layers', 1),
         comparison_dim=ckpt.get('comparison_dim', 50),
         dropout=ckpt.get('dropout', config.training.dropout),
+        bidirectional=ckpt.get('bidirectional', True),
     )
     model.load_state_dict(ckpt['model_state'])
     model.train(False)

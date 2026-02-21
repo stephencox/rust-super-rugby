@@ -18,7 +18,7 @@
 - [x] **Probability Calibration:** Platt scaling (LBFGS on validation logits) stored in checkpoint, applied at inference
 
 ## Sequence Models (LSTM/Transformer)
-- [ ] **Bidirectional LSTMs:** Update `SequenceLSTM` to be bidirectional to capture patterns more effectively.
+- [x] **Bidirectional LSTMs:** `SequenceLSTM` with `bidirectional=True`, temporal attention over BiLSTM outputs
 - [ ] **Transformer Architecture:** Replace or augment the LSTM backbone with a Transformer/Self-Attention encoder to capture long-range dependencies in a team's sequence history.
 - [ ] **Recurrent Dropout & Masking:** Improve variable-length sequence handling and prevent overfitting with proper RNN masking and sequence dropout techniques.
 

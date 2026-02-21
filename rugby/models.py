@@ -194,14 +194,14 @@ MATCH_FEATURE_DIM = 23
 
 class SequenceLSTM(nn.Module):
     """
-    LSTM model for rugby match prediction using team history sequences.
+    Bidirectional LSTM model for rugby match prediction using team history sequences.
 
-    Processes home and away team history through a shared LSTM, then
+    Processes home and away team history through a shared BiLSTM, then
     combines the representations with comparison features for prediction.
 
     Architecture:
-    1. Process home team history through LSTM -> home_repr
-    2. Process away team history through same LSTM -> away_repr
+    1. Process home team history through BiLSTM -> home_repr
+    2. Process away team history through same BiLSTM -> away_repr
     3. Concatenate [home_repr, away_repr, comparison_features] -> win_logit -> win_prob
     4. [combined + win_prob] -> margin
     """
@@ -213,11 +213,15 @@ class SequenceLSTM(nn.Module):
         num_layers: int = 1,
         comparison_dim: int = 50,
         dropout: float = 0.0,
+        bidirectional: bool = True,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        num_directions = 2 if bidirectional else 1
+        repr_size = hidden_size * num_directions  # output dim per timestep
 
         # LayerNorm on sequence input (normalizes each timestep's features)
         self.input_norm = nn.LayerNorm(input_dim)
@@ -229,6 +233,7 @@ class SequenceLSTM(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
+            bidirectional=bidirectional,
         )
 
         # Encourage remembering by default (Jozefowicz et al., 2015)
@@ -238,15 +243,15 @@ class SequenceLSTM(nn.Module):
                 param.data[n // 4 : n // 2].fill_(1.0)  # forget gate bias
 
         # Temporal attention over LSTM timestep outputs
-        self.attn_fc = nn.Linear(hidden_size, hidden_size)
-        self.attn_score = nn.Linear(hidden_size, 1)
+        self.attn_fc = nn.Linear(repr_size, repr_size)
+        self.attn_score = nn.Linear(repr_size, 1)
 
         # Dropout for regularization
         self.dropout = nn.Dropout(dropout)
 
         # FC layer for win prediction
-        # Combined: home_hidden + away_hidden + comparison
-        fc_input_size = hidden_size * 2 + comparison_dim
+        # Combined: home_repr + away_repr + comparison
+        fc_input_size = repr_size * 2 + comparison_dim
         self.win_fc = nn.Linear(fc_input_size, hidden_size)
         self.win_head = nn.Linear(hidden_size, 1)
 
