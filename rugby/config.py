@@ -1,17 +1,9 @@
 """TOML-based configuration for rugby prediction."""
 
-import sys
+import tomllib
 from dataclasses import dataclass, field
 from typing import List
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib
 
 
 @dataclass

@@ -40,8 +40,7 @@
 - [ ] **Player/Roster Data:** Track key absences (e.g., missing top performant fly-half/goal kicker) or injuries to account for dramatic squad strength changes.
 
 ## General Project Improvements
-- [ ] **Automated Testing:** Implement a test suite using `pytest` for `features.py`, `data.py`, and `scrapers.py`.
-- [ ] **Data Leakage Validation:** Explicitly test to ensure no future matches leak into historical feature windows.
-- [ ] **Dependency Fix:** Add `tomli` to `requirements.txt` for compatibility with Python < 3.11.
+- [x] **Automated Testing:** pytest suite with 56 tests covering `data.py`, `features.py`, and `training.py`
+- [x] **Data Leakage Validation:** Dedicated `test_data_leakage.py` validates no future data leaks into feature windows
 - [ ] **Unified Model Checkpoints:** Consolidate model weights, normalization constants, and training metadata into a single checkpoint file or directory.
 - [ ] **Experiment Tracking Integration:** Integrate an experiment logger (like `Weights & Biases`, `MLflow`, or `TensorBoard`) to visualize train/val loss curves, monitor hyperparameter sweeps, and compare different model iterations intuitively.
