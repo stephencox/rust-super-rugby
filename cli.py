@@ -443,17 +443,24 @@ def cmd_train(args, config: Config):
 
     prefix = model_prefix(config)
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    win_model.save(f"{prefix}_win.pt")
-    margin_model.save(f"{prefix}_margin.pt")
 
-    # Save normalizer + team embedding metadata for inference restoration
-    team_to_idx_keys = np.array(sorted(teams.keys()), dtype=np.int64)
-    np.savez(f"{prefix}_mlp_norm.npz", mean=normalizer.mean, std=normalizer.std,
-             margin_scale=np.array([margin_scale]),
-             num_teams=np.array([num_teams]),
-             team_embed_dim=np.array([win_model.team_embed_dim]),
-             team_to_idx_keys=team_to_idx_keys)
-    print(f"\nModels saved to {prefix}_win.pt, {prefix}_margin.pt")
+    # Unified checkpoint: models + normalizer + metadata in one file
+    checkpoint = {
+        'win_model_state': win_model.state_dict(),
+        'margin_model_state': margin_model.state_dict(),
+        'normalizer_mean': normalizer.mean,
+        'normalizer_std': normalizer.std,
+        'margin_scale': margin_scale,
+        'num_teams': num_teams,
+        'team_embed_dim': win_model.team_embed_dim,
+        'team_to_idx_keys': sorted(teams.keys()),
+        'hidden_dims': config.model.hidden_dims,
+        'dropout': config.training.dropout,
+        'input_dim': X_train.shape[1],
+    }
+    mlp_path = f"{prefix}_mlp.pt"
+    torch.save(checkpoint, mlp_path)
+    print(f"\nModel saved to {mlp_path}")
 
 
 def cmd_train_lstm(args, config: Config):
@@ -529,9 +536,23 @@ def cmd_train_lstm(args, config: Config):
 
     prefix = model_prefix(config)
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    model.save(f"{prefix}_lstm.pt")
-    normalizer.save(f"{prefix}_lstm_norm.npz")
-    print(f"\nModel saved to {prefix}_lstm.pt")
+
+    # Unified checkpoint: model + normalizer + metadata
+    checkpoint = {
+        'model_state': model.state_dict(),
+        'seq_mean': normalizer.seq_mean,
+        'seq_std': normalizer.seq_std,
+        'comp_mean': normalizer.comp_mean,
+        'comp_std': normalizer.comp_std,
+        'input_dim': 23,
+        'hidden_size': hidden_size,
+        'num_layers': 1,
+        'comparison_dim': 50,
+        'dropout': config.training.dropout,
+    }
+    lstm_path = f"{prefix}_lstm.pt"
+    torch.save(checkpoint, lstm_path)
+    print(f"\nModel saved to {lstm_path}")
 
 
 def cmd_tune_mlp(args, config: Config):
@@ -663,6 +684,68 @@ def cmd_tune_lstm(args, config: Config):
     print(f"Best mean accuracy: {study.best_value:.1%}")
 
 
+def load_mlp_checkpoint(prefix: Path, config: Config):
+    """Load MLP models, normalizer, and metadata from unified checkpoint.
+
+    Returns (win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams).
+    """
+    mlp_path = Path(f"{prefix}_mlp.pt")
+    ckpt = torch.load(mlp_path, weights_only=False)
+
+    normalizer = FeatureNormalizer()
+    normalizer.mean = ckpt['normalizer_mean']
+    normalizer.std = ckpt['normalizer_std']
+    margin_scale = ckpt.get('margin_scale', 1.0)
+    num_teams = ckpt.get('num_teams', 0)
+    team_embed_dim = ckpt.get('team_embed_dim', 8)
+    hidden_dims = ckpt.get('hidden_dims', config.model.hidden_dims)
+    dropout = ckpt.get('dropout', config.training.dropout)
+    input_dim = ckpt.get('input_dim', len(normalizer.mean))
+
+    team_to_idx = {}
+    for i, tid in enumerate(ckpt.get('team_to_idx_keys', [])):
+        team_to_idx[int(tid)] = i + 1
+
+    win_model = WinClassifier(input_dim, hidden_dims=hidden_dims, dropout=dropout,
+                               use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
+    win_model.load_state_dict(ckpt['win_model_state'])
+    win_model.train(False)
+
+    margin_model = MarginRegressor(input_dim, hidden_dims=hidden_dims, dropout=dropout,
+                                    use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
+    margin_model.load_state_dict(ckpt['margin_model_state'])
+    margin_model.train(False)
+
+    return win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams
+
+
+def load_lstm_checkpoint(prefix: Path, config: Config):
+    """Load LSTM model and normalizer from unified checkpoint.
+
+    Returns (model, normalizer).
+    """
+    lstm_path = Path(f"{prefix}_lstm.pt")
+    ckpt = torch.load(lstm_path, weights_only=False)
+
+    normalizer = SequenceNormalizer()
+    normalizer.seq_mean = ckpt['seq_mean']
+    normalizer.seq_std = ckpt['seq_std']
+    normalizer.comp_mean = ckpt['comp_mean']
+    normalizer.comp_std = ckpt['comp_std']
+
+    model = SequenceLSTM(
+        input_dim=ckpt.get('input_dim', 23),
+        hidden_size=ckpt.get('hidden_size', 64),
+        num_layers=ckpt.get('num_layers', 1),
+        comparison_dim=ckpt.get('comparison_dim', 50),
+        dropout=ckpt.get('dropout', config.training.dropout),
+    )
+    model.load_state_dict(ckpt['model_state'])
+    model.train(False)
+
+    return model, normalizer
+
+
 def cmd_predict(args, config: Config):
     """Predict a single match."""
     db_path = Path(config.data.database_path)
@@ -685,21 +768,11 @@ def cmd_predict(args, config: Config):
     prefix = model_prefix(config)
 
     if args.model == "lstm":
+        model, normalizer = load_lstm_checkpoint(prefix, config)
+
         builder = SequenceFeatureBuilder(matches, teams, seq_len=10)
         for match in sorted(matches, key=lambda m: m.date):
             builder.process_match(match)
-
-        norm_data = np.load(f"{prefix}_lstm_norm.npz")
-        normalizer = SequenceNormalizer()
-        normalizer.seq_mean = norm_data["seq_mean"]
-        normalizer.seq_std = norm_data["seq_std"]
-        normalizer.comp_mean = norm_data["comp_mean"]
-        normalizer.comp_std = norm_data["comp_std"]
-
-        model = SequenceLSTM(input_dim=23, hidden_size=64, num_layers=1,
-                             comparison_dim=50, dropout=0.3)
-        model.load(f"{prefix}_lstm.pt")
-        model.train(False)
 
         now = datetime.now()
         home_seq = builder._build_team_sequence(home_team.id, now)
@@ -710,9 +783,9 @@ def cmd_predict(args, config: Config):
             print("Error: Insufficient match history for prediction")
             sys.exit(1)
 
-        home_seq_norm = (home_seq - normalizer.seq_mean) / normalizer.seq_std
-        away_seq_norm = (away_seq - normalizer.seq_mean) / normalizer.seq_std
-        comp_norm = (comparison - normalizer.comp_mean) / normalizer.comp_std
+        home_seq_norm = normalizer.transform_sequence(home_seq)
+        away_seq_norm = normalizer.transform_sequence(away_seq)
+        comp_norm = normalizer.transform_comparison(comparison)
 
         with torch.no_grad():
             preds = model.predict(
@@ -723,35 +796,13 @@ def cmd_predict(args, config: Config):
         win_prob = preds["win_prob"].item()
         margin = preds["margin"].item()
     else:
+        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams = \
+            load_mlp_checkpoint(prefix, config)
+
         builder = FeatureBuilder(matches, teams)
         for match in sorted(matches, key=lambda m: m.date):
             builder.build_features(match)
             builder.process_match(match)
-
-        norm_data = np.load(f"{prefix}_mlp_norm.npz")
-        normalizer = FeatureNormalizer()
-        normalizer.mean = norm_data["mean"]
-        normalizer.std = norm_data["std"]
-        margin_scale = float(norm_data["margin_scale"][0]) if "margin_scale" in norm_data else 1.0
-        num_teams = int(norm_data["num_teams"][0]) if "num_teams" in norm_data else 0
-        team_embed_dim = int(norm_data["team_embed_dim"][0]) if "team_embed_dim" in norm_data else 8
-
-        # Reconstruct team_to_idx mapping
-        team_to_idx = {}
-        if "team_to_idx_keys" in norm_data:
-            for i, tid in enumerate(norm_data["team_to_idx_keys"]):
-                team_to_idx[int(tid)] = i + 1
-
-        input_dim = len(normalizer.mean)
-        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
-                                  use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-        win_model.load(f"{prefix}_win.pt")
-        win_model.train(False)
-
-        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
-                                       use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-        margin_model.load(f"{prefix}_margin.pt")
-        margin_model.train(False)
 
         now = datetime.now()
         synthetic = Match(
@@ -833,21 +884,11 @@ def cmd_predict_next(args, config: Config):
     if args.model == "lstm":
         if not output_json and not output_csv:
             print("Loading LSTM model...")
+        model, normalizer = load_lstm_checkpoint(prefix, config)
+
         builder = SequenceFeatureBuilder(matches, teams, seq_len=10)
         for match in sorted(matches, key=lambda m: m.date):
             builder.process_match(match)
-
-        norm_data = np.load(f"{prefix}_lstm_norm.npz")
-        normalizer = SequenceNormalizer()
-        normalizer.seq_mean = norm_data["seq_mean"]
-        normalizer.seq_std = norm_data["seq_std"]
-        normalizer.comp_mean = norm_data["comp_mean"]
-        normalizer.comp_std = norm_data["comp_std"]
-
-        model = SequenceLSTM(input_dim=23, hidden_size=64, num_layers=1,
-                             comparison_dim=50, dropout=0.3)
-        model.load(f"{prefix}_lstm.pt")
-        model.train(False)
 
         def predict_fn(home_team, away_team):
             now = datetime.now()
@@ -856,9 +897,9 @@ def cmd_predict_next(args, config: Config):
             comparison = builder._build_comparison_features(home_team.id, away_team.id, now)
             if home_seq is None or away_seq is None or comparison is None:
                 return None
-            home_seq_norm = (home_seq - normalizer.seq_mean) / normalizer.seq_std
-            away_seq_norm = (away_seq - normalizer.seq_mean) / normalizer.seq_std
-            comp_norm = (comparison - normalizer.comp_mean) / normalizer.comp_std
+            home_seq_norm = normalizer.transform_sequence(home_seq)
+            away_seq_norm = normalizer.transform_sequence(away_seq)
+            comp_norm = normalizer.transform_comparison(comparison)
             with torch.no_grad():
                 preds = model.predict(
                     torch.tensor(home_seq_norm, dtype=torch.float32).unsqueeze(0),
@@ -869,41 +910,20 @@ def cmd_predict_next(args, config: Config):
     else:
         if not output_json and not output_csv:
             print("Loading MLP models...")
+        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams = \
+            load_mlp_checkpoint(prefix, config)
+
         builder = FeatureBuilder(matches, teams)
         for match in sorted(matches, key=lambda m: m.date):
             builder.build_features(match)
             builder.process_match(match)
-
-        norm_data = np.load(f"{prefix}_mlp_norm.npz")
-        normalizer = FeatureNormalizer()
-        normalizer.mean = norm_data["mean"]
-        normalizer.std = norm_data["std"]
-        margin_scale = float(norm_data["margin_scale"][0]) if "margin_scale" in norm_data else 1.0
-        num_teams = int(norm_data["num_teams"][0]) if "num_teams" in norm_data else 0
-        team_embed_dim = int(norm_data["team_embed_dim"][0]) if "team_embed_dim" in norm_data else 8
-
-        team_to_idx = {}
-        if "team_to_idx_keys" in norm_data:
-            for i, tid in enumerate(norm_data["team_to_idx_keys"]):
-                team_to_idx[int(tid)] = i + 1
-
-        input_dim = len(normalizer.mean)
-        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
-                                  use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-        win_model.load(f"{prefix}_win.pt")
-        win_model.train(False)
-
-        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
-                                       use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-        margin_model.load(f"{prefix}_margin.pt")
-        margin_model.train(False)
 
         def predict_fn(home_team, away_team):
             now = datetime.now()
             synthetic = Match(
                 id=-1, date=now,
                 home_team_id=home_team.id, away_team_id=away_team.id,
-                home_score=0, away_score=0, home_win=True,
+                home_score=0, away_score=0,
                 venue=None, round=None,
             )
             features = builder.build_features(synthetic)
@@ -1001,26 +1021,14 @@ def cmd_model_validate(args, config: Config):
     prefix = model_prefix(config)
     errors = []
 
-    # MLP (win + margin)
-    win_path = Path(f"{prefix}_win.pt")
-    margin_path = Path(f"{prefix}_margin.pt")
-    norm_path = Path(f"{prefix}_mlp_norm.npz")
-    if win_path.exists() and margin_path.exists() and norm_path.exists():
+    # MLP (unified checkpoint)
+    mlp_path = Path(f"{prefix}_mlp.pt")
+    if mlp_path.exists():
         try:
-            norm_data = np.load(norm_path)
-            normalizer = FeatureNormalizer()
-            normalizer.mean = norm_data["mean"]
-            normalizer.std = norm_data["std"]
+            win_m, margin_m, normalizer, margin_scale, team_to_idx, num_teams = \
+                load_mlp_checkpoint(prefix, config)
             input_dim = len(normalizer.mean)
-            num_teams = int(norm_data["num_teams"][0]) if "num_teams" in norm_data else 0
-            team_embed_dim = int(norm_data["team_embed_dim"][0]) if "team_embed_dim" in norm_data else 8
-            win_m = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
-                                  use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-            win_m.load(win_path)
-            margin_m = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
-                                       use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-            margin_m.load(margin_path)
-            embed_info = f", {num_teams} teams, embed_dim={team_embed_dim}" if num_teams > 0 else ""
+            embed_info = f", {num_teams} teams, embed_dim={win_m.team_embed_dim}" if num_teams > 0 else ""
             print(f"  MLP win model: OK ({input_dim} features{embed_info})")
             print(f"  MLP margin model: OK ({input_dim} features{embed_info})")
         except Exception as e:
@@ -1029,15 +1037,11 @@ def cmd_model_validate(args, config: Config):
     else:
         print("  MLP models: not found")
 
-    # LSTM
+    # LSTM (unified checkpoint)
     lstm_path = Path(f"{prefix}_lstm.pt")
-    lstm_norm_path = Path(f"{prefix}_lstm_norm.npz")
-    if lstm_path.exists() and lstm_norm_path.exists():
+    if lstm_path.exists():
         try:
-            norm_data = np.load(lstm_norm_path)
-            model = SequenceLSTM(input_dim=23, hidden_size=64, num_layers=1,
-                                 comparison_dim=50, dropout=0.3)
-            model.load(lstm_path)
+            model, normalizer = load_lstm_checkpoint(prefix, config)
             print(f"  LSTM model: OK")
         except Exception as e:
             errors.append(f"LSTM: {e}")

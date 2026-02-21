@@ -42,5 +42,5 @@
 ## General Project Improvements
 - [x] **Automated Testing:** pytest suite with 56 tests covering `data.py`, `features.py`, and `training.py`
 - [x] **Data Leakage Validation:** Dedicated `test_data_leakage.py` validates no future data leaks into feature windows
-- [ ] **Unified Model Checkpoints:** Consolidate model weights, normalization constants, and training metadata into a single checkpoint file or directory.
+- [x] **Unified Model Checkpoints:** Single `_mlp.pt` and `_lstm.pt` files contain model weights, normalizer, and metadata
 - [ ] **Experiment Tracking Integration:** Integrate an experiment logger (like `Weights & Biases`, `MLflow`, or `TensorBoard`) to visualize train/val loss curves, monitor hyperparameter sweeps, and compare different model iterations intuitively.
