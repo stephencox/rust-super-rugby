@@ -15,6 +15,7 @@ from .wikipedia import (
     TeamInfo,
     extract_date,
     _infer_rounds,
+    _count_tries_in_cell,
 )
 
 log = logging.getLogger(__name__)
@@ -222,6 +223,25 @@ class SixNationsScraper:
                     loc = event.find("span", class_="location")
                     venue = loc.get_text().strip() if loc else None
 
+                # Extract try counts from detail cells
+                tds = event.find_all("td")
+                score_idx = None
+                for i, td in enumerate(tds):
+                    if score_re.search(td.get_text()):
+                        score_idx = i
+                        break
+                home_tries = None
+                away_tries = None
+                if score_idx is not None:
+                    for td in tds[score_idx + 1:]:
+                        if 'Try' in td.get_text():
+                            t = _count_tries_in_cell(td)
+                            if home_tries is None:
+                                home_tries = t
+                            elif away_tries is None:
+                                away_tries = t
+                                break
+
                 matches.append(RawMatch(
                     date=match_date,
                     home_team=home_info,
@@ -229,6 +249,8 @@ class SixNationsScraper:
                     home_score=int(score_match.group(1)),
                     away_score=int(score_match.group(2)),
                     venue=venue,
+                    home_tries=home_tries,
+                    away_tries=away_tries,
                 ))
 
         return matches

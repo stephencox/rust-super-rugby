@@ -25,7 +25,7 @@
 ## Feature Engineering Improvements
 
 ### Data Acquisition
-- [ ] **Scraper Enhancement (Tries):** Update Wikipedia and Six Nations scrapers to extract try counts (`home_tries`, `away_tries`) for more granular offensive metrics.
+- [x] **Scraper Enhancement (Tries):** `_count_tries_in_cell()` extracts try counts from HTML detail cells in both SportsEvent and collapsible table formats (72% SR, 98% 6N coverage)
 - [x] **Bye Week Logic:** `home_is_after_bye` / `away_is_after_bye` binary features (rest >= 13 days) in MatchFeatures
 - [ ] **Lassen Scraper Implementation:** Flesh out `lassen.py` to fetch match round numbers and local times from lassen.co.nz.
 - [ ] **SA Rugby Scraper Implementation:** Flesh out `sarugby.py` to get detailed match data from sarugby.co.za.

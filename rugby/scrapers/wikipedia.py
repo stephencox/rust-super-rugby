@@ -7,11 +7,49 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 from .cache import HttpCache
 
 log = logging.getLogger(__name__)
+
+
+def _count_tries_in_cell(td) -> int:
+    """Count tries from a match detail <td> element.
+
+    Handles two formats:
+    - Old: <b>Try:</b> <a>Name</a><br/><a>Name2</a> (2)<br/><b>Con:</b>...
+    - New: <b>Try:</b> <a>Name</a> 16'<a>Name2</a> (2) 44', 68'<b>Con:</b>...
+    """
+    try_tag = None
+    for b in td.find_all('b'):
+        if b.get_text().strip().rstrip(':').lower() == 'try':
+            try_tag = b
+            break
+    if not try_tag:
+        return 0
+
+    total = 0
+    prev_was_link = False
+    for sibling in try_tag.next_siblings:
+        if sibling.name == 'b':
+            break
+        if sibling.name == 'a':
+            total += 1
+            prev_was_link = True
+        elif isinstance(sibling, NavigableString):
+            text = str(sibling).strip()
+            if not text:
+                prev_was_link = False
+                continue
+            multi = re.match(r'^\((\d+)\)', text)
+            if multi and prev_was_link:
+                # Previous link was counted as 1, adjust to N
+                total += int(multi.group(1)) - 1
+            prev_was_link = False
+        else:
+            prev_was_link = False
+    return total
 
 
 @dataclass
@@ -416,6 +454,27 @@ class WikipediaScraper:
                 loc = event.find("span", class_="location")
                 venue = loc.get_text().strip() if loc else None
 
+                # Extract try counts from detail cells
+                # In SportsEvent format: home details are before score, away after
+                tds = event.find_all("td")
+                score_idx = None
+                for i, td in enumerate(tds):
+                    if score_re.search(td.get_text()):
+                        score_idx = i
+                        break
+                home_tries = None
+                away_tries = None
+                if score_idx is not None:
+                    # Home detail cell: first cell with Try: before score
+                    for td in tds[score_idx + 1:]:
+                        t = _count_tries_in_cell(td)
+                        if 'Try' in td.get_text() or t > 0:
+                            if home_tries is None:
+                                home_tries = t
+                            elif away_tries is None:
+                                away_tries = t
+                                break
+
                 matches.append(RawMatch(
                     date=match_date,
                     home_team=home_info,
@@ -423,6 +482,8 @@ class WikipediaScraper:
                     home_score=int(score_match.group(1)),
                     away_score=int(score_match.group(2)),
                     venue=venue,
+                    home_tries=home_tries,
+                    away_tries=away_tries,
                 ))
 
         return matches
@@ -433,7 +494,8 @@ class WikipediaScraper:
         score_re = re.compile(r"(\d{1,3})\s*[–\-]\s*(\d{1,3})")
 
         for table in soup.find_all("table", class_="mw-collapsible"):
-            for row in table.find_all("tr"):
+            rows = table.find_all("tr")
+            for row_idx, row in enumerate(rows):
                 cells = row.find_all("td")
                 if len(cells) < 4:
                     continue
@@ -463,6 +525,20 @@ class WikipediaScraper:
                 if match_date and home_info and away_info:
                     venue_text = cells[-1].get_text().strip() if len(cells) > score_cell_idx + 2 else None
 
+                    # Extract try counts from the next row (detail row)
+                    home_tries = None
+                    away_tries = None
+                    if row_idx + 1 < len(rows):
+                        detail_cells = rows[row_idx + 1].find_all("td")
+                        for dc in detail_cells:
+                            if 'Try' in dc.get_text():
+                                t = _count_tries_in_cell(dc)
+                                if home_tries is None:
+                                    home_tries = t
+                                elif away_tries is None:
+                                    away_tries = t
+                                    break
+
                     matches.append(RawMatch(
                         date=match_date,
                         home_team=home_info,
@@ -470,6 +546,8 @@ class WikipediaScraper:
                         home_score=int(score_match.group(1)),
                         away_score=int(score_match.group(2)),
                         venue=venue_text,
+                        home_tries=home_tries,
+                        away_tries=away_tries,
                     ))
 
         return matches
