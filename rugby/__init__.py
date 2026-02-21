@@ -12,18 +12,14 @@ from .features import (
 )
 from .models import (
     WinClassifier,
-    ScoreRegressor,
-    MatchPredictor,
+    MarginRegressor,
     SequenceLSTM,
     MATCH_FEATURE_DIM,
 )
 from .training import (
     train_win_model,
-    train_score_model,
-    train_match_predictor,
+    train_margin_model,
     evaluate_win_model,
-    evaluate_score_model,
-    evaluate_match_predictor,
 )
 from .config import Config
 
@@ -42,14 +38,10 @@ __all__ = [
     'SequenceNormalizer',
     'SEQUENCE_FEATURE_DIM',
     'WinClassifier',
-    'ScoreRegressor',
-    'MatchPredictor',
+    'MarginRegressor',
     'SequenceLSTM',
     'MATCH_FEATURE_DIM',
     'train_win_model',
-    'train_score_model',
-    'train_match_predictor',
+    'train_margin_model',
     'evaluate_win_model',
-    'evaluate_score_model',
-    'evaluate_match_predictor',
 ]

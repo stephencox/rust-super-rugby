@@ -14,13 +14,16 @@ class WinClassifier(nn.Module):
     Outputs probability that home team wins.
     """
 
-    def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0):
+    def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0,
+                 use_batchnorm: bool = False):
         super().__init__()
 
         layers = []
         prev_dim = input_dim
         for h_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, h_dim))
+            if use_batchnorm:
+                layers.append(nn.BatchNorm1d(h_dim))
             layers.append(nn.ReLU())
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
@@ -62,54 +65,49 @@ class WinClassifier(nn.Module):
         self.load_state_dict(torch.load(path, weights_only=True))
 
 
-class ScoreRegressor(nn.Module):
+class MarginRegressor(nn.Module):
     """
-    MLP regressor for predicting match scores.
+    MLP regressor for predicting match margin (absolute points difference).
 
-    Takes features + win probability as input.
-    Outputs (home_score, away_score) predictions.
+    Takes the same features as WinClassifier — fully independent, no win_prob dependency.
+    Output is non-negative (ReLU on head).
     """
 
-    def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0):
+    def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0,
+                 use_batchnorm: bool = False):
         super().__init__()
 
-        # Input is features + win_prob (1 extra dimension)
         layers = []
-        prev_dim = input_dim + 1  # +1 for win probability
+        prev_dim = input_dim
         for h_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, h_dim))
+            if use_batchnorm:
+                layers.append(nn.BatchNorm1d(h_dim))
             layers.append(nn.ReLU())
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
             prev_dim = h_dim
 
         self.backbone = nn.Sequential(*layers)
-        self.home_head = nn.Linear(prev_dim, 1)
-        self.away_head = nn.Linear(prev_dim, 1)
+        self.head = nn.Linear(prev_dim, 1)
 
-    def forward(self, x: torch.Tensor, win_prob: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
 
         Args:
             x: Input features [batch, input_dim]
-            win_prob: Win probability from classifier [batch]
 
         Returns:
-            (home_score, away_score) predictions, each [batch]
+            Predicted margin [batch] (always non-negative)
         """
-        # Concatenate features with win probability
-        combined = torch.cat([x, win_prob.unsqueeze(-1)], dim=-1)
-        h = self.backbone(combined)
-        # Use ReLU to ensure non-negative scores
-        home = torch.relu(self.home_head(h)).squeeze(-1)
-        away = torch.relu(self.away_head(h)).squeeze(-1)
-        return home, away
+        h = self.backbone(x)
+        return torch.relu(self.head(h)).squeeze(-1)
 
-    def predict(self, x: torch.Tensor, win_prob: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get score predictions."""
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
+        """Get margin predictions."""
         with torch.no_grad():
-            return self.forward(x, win_prob)
+            return self.forward(x)
 
     def save(self, path: Path):
         """Save model weights."""
@@ -118,134 +116,6 @@ class ScoreRegressor(nn.Module):
     def load(self, path: Path):
         """Load model weights."""
         self.load_state_dict(torch.load(path, weights_only=True))
-
-
-class MatchPredictor(nn.Module):
-    """
-    End-to-end model that predicts win probability and margin.
-
-    Architecture:
-    1. Win classifier: features -> win_logit -> win_prob
-    2. Margin regressor: [features, win_prob] -> margin (absolute points difference)
-
-    The win probability informs the margin prediction.
-    """
-
-    def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0):
-        super().__init__()
-
-        # Win classifier backbone
-        win_layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            win_layers.append(nn.Linear(prev_dim, h_dim))
-            win_layers.append(nn.ReLU())
-            if dropout > 0:
-                win_layers.append(nn.Dropout(dropout))
-            prev_dim = h_dim
-
-        self.win_backbone = nn.Sequential(*win_layers)
-        self.win_head = nn.Linear(prev_dim, 1)
-
-        # Margin regressor backbone (takes features + win_prob)
-        margin_layers = []
-        prev_dim = input_dim + 1  # +1 for win probability
-        for h_dim in hidden_dims:
-            margin_layers.append(nn.Linear(prev_dim, h_dim))
-            margin_layers.append(nn.ReLU())
-            if dropout > 0:
-                margin_layers.append(nn.Dropout(dropout))
-            prev_dim = h_dim
-
-        self.margin_backbone = nn.Sequential(*margin_layers)
-        self.margin_head = nn.Linear(prev_dim, 1)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass.
-
-        Args:
-            x: Input features [batch, input_dim]
-
-        Returns:
-            (win_logit, margin)
-            - win_logit: [batch] (apply sigmoid for probability)
-            - margin: [batch] (absolute points difference, always positive)
-        """
-        # Win prediction
-        win_h = self.win_backbone(x)
-        win_logit = self.win_head(win_h).squeeze(-1)
-        win_prob = torch.sigmoid(win_logit)
-
-        # Margin prediction (using win_prob as input)
-        combined = torch.cat([x, win_prob.unsqueeze(-1)], dim=-1)
-        margin_h = self.margin_backbone(combined)
-        margin = torch.relu(self.margin_head(margin_h)).squeeze(-1)  # Always positive
-
-        return win_logit, margin
-
-    def predict(self, x: torch.Tensor) -> dict:
-        """Get all predictions."""
-        with torch.no_grad():
-            win_logit, margin = self.forward(x)
-            win_prob = torch.sigmoid(win_logit)
-            return {
-                'win_prob': win_prob,
-                'margin': margin,
-            }
-
-    def save(self, path: Path):
-        """Save model weights."""
-        torch.save(self.state_dict(), path)
-
-    def load(self, path: Path):
-        """Load model weights."""
-        self.load_state_dict(torch.load(path, weights_only=True))
-
-
-class CombinedPredictor:
-    """
-    Combines WinClassifier and ScoreRegressor for full match prediction.
-    """
-
-    def __init__(self, win_model: WinClassifier, score_model: ScoreRegressor,
-                 normalizer=None):
-        self.win_model = win_model
-        self.score_model = score_model
-        self.normalizer = normalizer
-
-    def predict(self, X: np.ndarray) -> dict:
-        """
-        Predict match outcomes.
-
-        Args:
-            X: Features array [batch, num_features]
-
-        Returns:
-            Dictionary with predictions
-        """
-        # Normalize if normalizer provided
-        if self.normalizer:
-            X = self.normalizer.transform(X)
-
-        X_tensor = torch.tensor(X, dtype=torch.float32)
-
-        # Get predictions
-        self.win_model.train(False)
-        self.score_model.train(False)
-
-        win_prob = self.win_model.predict_proba(X_tensor).numpy()
-        home_score, away_score = self.score_model.predict(X_tensor)
-        home_score = home_score.numpy()
-        away_score = away_score.numpy()
-
-        return {
-            'win_prob': win_prob,
-            'home_score': home_score,
-            'away_score': away_score,
-            'predicted_winner': np.where(win_prob >= 0.5, 'home', 'away'),
-            'predicted_margin': np.abs(home_score - away_score),
-        }
 
 
 # =============================================================================

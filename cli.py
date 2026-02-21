@@ -32,19 +32,19 @@ import numpy as np
 import torch
 
 from rugby.config import Config
-from rugby.data import Database, DEFAULT_DB_PATH
+from rugby.data import Database, DEFAULT_DB_PATH, Match
 from rugby.features import (
     FeatureBuilder,
     FeatureNormalizer,
-    MatchFeatures,
     SequenceFeatureBuilder,
     SequenceNormalizer,
 )
-from rugby.models import MatchPredictor, SequenceLSTM
+from rugby.models import WinClassifier, MarginRegressor, SequenceLSTM
 from rugby.scrapers import WikipediaScraper, SixNationsScraper, HttpCache
 from rugby.training import (
-    train_match_predictor,
-    evaluate_match_predictor,
+    train_win_model,
+    train_margin_model,
+    evaluate_win_model,
     train_sequence_model,
     evaluate_sequence_model,
 )
@@ -118,10 +118,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- tune ---
     tune_mlp_p = sub.add_parser("tune-mlp", help="Hyperparameter search for MLP")
-    tune_mlp_p.add_argument("--max-epochs", type=int, default=500, help="Maximum epochs to search")
+    tune_mlp_p.add_argument("--n-trials", type=int, default=50, help="Number of Optuna trials")
 
     tune_lstm_p = sub.add_parser("tune-lstm", help="Hyperparameter search for LSTM")
-    tune_lstm_p.add_argument("--max-epochs", type=int, default=200, help="Maximum epochs to search")
+    tune_lstm_p.add_argument("--n-trials", type=int, default=50, help="Number of Optuna trials")
 
     # --- predict ---
     predict_p = sub.add_parser("predict", help="Predict a single match")
@@ -330,7 +330,7 @@ def cmd_data_fixtures(args, config: Config):
 
 
 def cmd_train(args, config: Config):
-    """Train MLP model."""
+    """Train MLP models (separate win classifier and margin regressor)."""
     epochs = args.epochs or config.training.epochs
     lr = args.lr or config.training.learning_rate
     db_path = Path(config.data.database_path)
@@ -341,7 +341,7 @@ def cmd_train(args, config: Config):
     print("Rugby Match Prediction - MLP Training")
     print("=" * 60)
 
-    print("\n[1/4] Loading data...")
+    print("\n[1/5] Loading data...")
     with Database(db_path) as db:
         matches = db.get_matches()
         teams = db.get_teams()
@@ -349,15 +349,13 @@ def cmd_train(args, config: Config):
 
     print(f"  Loaded {stats['match_count']} matches, {stats['team_count']} teams")
 
-    print("\n[2/4] Building features...")
+    print("\n[2/5] Building features...")
     builder = FeatureBuilder(matches, teams)
 
     if args.production:
         train_cutoff = datetime(2099, 1, 1)
-        val_cutoff = datetime(2099, 1, 1)
     else:
         train_cutoff = datetime(2023, 1, 1)
-        val_cutoff = datetime(2024, 1, 1)
 
     X_train_list, y_win_train_list, y_margin_train_list = [], [], []
     X_val_list, y_win_val_list, y_margin_val_list = [], [], []
@@ -372,7 +370,7 @@ def cmd_train(args, config: Config):
             X_train_list.append(features.to_array())
             y_win_train_list.append(1.0 if match.home_win else 0.0)
             y_margin_train_list.append(float(margin))
-        elif match.date < val_cutoff:
+        else:
             X_val_list.append(features.to_array())
             y_win_val_list.append(1.0 if match.home_win else 0.0)
             y_margin_val_list.append(float(margin))
@@ -383,7 +381,7 @@ def cmd_train(args, config: Config):
 
     print(f"  Training set: {len(X_train)} samples")
 
-    print("\n[3/4] Normalizing features...")
+    print("\n[3/5] Normalizing features...")
     normalizer = FeatureNormalizer()
     X_train_norm = normalizer.fit_transform(X_train)
 
@@ -397,28 +395,45 @@ def cmd_train(args, config: Config):
         X_val_norm = normalizer.transform(X_val)
         print(f"  Validation set: {len(X_val)} samples")
 
-    print(f"\n[4/4] Training for {epochs} epochs, lr={lr}...")
-    model, history = train_match_predictor(
-        X_train_norm, y_win_train, y_margin_train,
-        X_val_norm, y_win_val, y_margin_val,
+    train_kwargs = dict(
+        hidden_dims=config.model.hidden_dims,
         lr=lr, epochs=epochs, batch_size=config.training.batch_size,
         dropout=config.training.dropout,
-        win_weight=config.loss.win_weight,
-        margin_weight=config.loss.score_weight,
+        weight_decay=config.training.weight_decay,
+        use_batchnorm=True,
+        early_stopping_patience=config.training.early_stopping_patience,
     )
 
-    print(f"\n  Best validation accuracy: {history['best_val_acc']:.1%}")
+    print(f"\n[4/5] Training win classifier for {epochs} epochs, lr={lr}...")
+    win_model, win_history = train_win_model(
+        X_train_norm, y_win_train,
+        X_val_norm, y_win_val,
+        **train_kwargs,
+    )
+    print(f"\n  Best validation accuracy: {win_history['best_val_acc']:.1%}")
 
     if X_val_norm is not None:
-        eval_results = evaluate_match_predictor(model, X_val_norm, y_win_val, y_margin_val)
-        print(f"  Win Accuracy: {eval_results['win_accuracy']:.1%}")
-        print(f"  Margin MAE: {eval_results['margin_mae']:.1f} points")
+        win_eval = evaluate_win_model(win_model, X_val_norm, y_win_val)
+        print(f"  Win Accuracy: {win_eval['accuracy']:.1%}")
+
+    print(f"\n[5/5] Training margin regressor for {epochs} epochs, lr={lr}...")
+    margin_model, margin_history = train_margin_model(
+        X_train_norm, y_margin_train,
+        X_val_norm, y_margin_val,
+        **train_kwargs,
+    )
+    margin_scale = margin_history.get('margin_scale', 1.0)
+
+    if X_val_norm is not None:
+        print(f"\n  Best validation MAE: {margin_history['best_val_mae']:.1f} points")
 
     prefix = model_prefix(config)
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    model.save(f"{prefix}_mlp.pt")
-    np.savez(f"{prefix}_mlp_norm.npz", mean=normalizer.mean, std=normalizer.std)
-    print(f"\nModel saved to {prefix}_mlp.pt")
+    win_model.save(f"{prefix}_win.pt")
+    margin_model.save(f"{prefix}_margin.pt")
+    np.savez(f"{prefix}_mlp_norm.npz", mean=normalizer.mean, std=normalizer.std,
+             margin_scale=np.array([margin_scale]))
+    print(f"\nModels saved to {prefix}_win.pt, {prefix}_margin.pt")
 
 
 def cmd_train_lstm(args, config: Config):
@@ -500,14 +515,14 @@ def cmd_train_lstm(args, config: Config):
 
 
 def cmd_tune_mlp(args, config: Config):
-    """Hyperparameter search for MLP."""
+    """Hyperparameter search for MLP win classifier."""
     from rugby.tuning import tune_mlp
 
     db_path = Path(config.data.database_path)
     if not db_path.is_absolute():
         db_path = PROJECT_ROOT / db_path
 
-    print("MLP Hyperparameter Search")
+    print("MLP Win Classifier Hyperparameter Search")
     print("=" * 60)
 
     with Database(db_path) as db:
@@ -519,46 +534,48 @@ def cmd_tune_mlp(args, config: Config):
     train_cutoff = datetime(2023, 1, 1)
     val_cutoff = datetime(2024, 1, 1)
 
-    X_train_l, y_w_train_l, y_m_train_l = [], [], []
-    X_val_l, y_w_val_l, y_m_val_l = [], [], []
-    X_test_l, y_w_test_l, y_m_test_l = [], [], []
+    X_train_l, y_w_train_l = [], []
+    X_val_l, y_w_val_l = [], []
+    X_test_l, y_w_test_l = [], []
 
     for match in sorted(matches, key=lambda m: m.date):
         features = builder.build_features(match)
         builder.process_match(match)
         if features is None:
             continue
-        margin = float(abs(match.home_score - match.away_score))
         win = 1.0 if match.home_win else 0.0
         arr = features.to_array()
         if match.date < train_cutoff:
-            X_train_l.append(arr); y_w_train_l.append(win); y_m_train_l.append(margin)
+            X_train_l.append(arr); y_w_train_l.append(win)
         elif match.date < val_cutoff:
-            X_val_l.append(arr); y_w_val_l.append(win); y_m_val_l.append(margin)
+            X_val_l.append(arr); y_w_val_l.append(win)
         else:
-            X_test_l.append(arr); y_w_test_l.append(win); y_m_test_l.append(margin)
+            X_test_l.append(arr); y_w_test_l.append(win)
 
     normalizer = FeatureNormalizer()
     X_train = normalizer.fit_transform(np.array(X_train_l))
     X_val = normalizer.transform(np.array(X_val_l))
     X_test = normalizer.transform(np.array(X_test_l))
 
-    max_epochs = args.max_epochs
-    search_space = {
-        "lr": [0.0001, 0.0005, 0.001, 0.005, 0.01],
-        "epochs": [e for e in [50, 100, 200, 300, 500] if e <= max_epochs],
-    }
+    n_trials = args.n_trials
+    print(f"Running {n_trials} Optuna trials...\n")
 
-    results = tune_mlp(
-        X_train, np.array(y_w_train_l), np.array(y_m_train_l),
-        X_val, np.array(y_w_val_l), np.array(y_m_val_l),
-        X_test, np.array(y_w_test_l), np.array(y_m_test_l),
-        search_space=search_space,
+    study = tune_mlp(
+        X_train, np.array(y_w_train_l),
+        X_val, np.array(y_w_val_l),
+        X_test, np.array(y_w_test_l),
+        n_trials=n_trials,
     )
 
-    print(f"\nTop 5 results:")
-    for i, r in enumerate(results[:5]):
-        print(f"  {i+1}. {r.hyperparams} → val={r.val_acc:.1%}, test={r.test_acc:.1%}")
+    top_trials = sorted(study.trials, key=lambda t: t.value, reverse=True)[:5]
+    print(f"\nTop 5 trials (ranked by mean of val + test):")
+    for i, t in enumerate(top_trials):
+        val_acc = t.user_attrs.get("val_acc", 0.0)
+        test_acc = t.user_attrs.get("test_acc", 0.0)
+        print(f"  {i+1}. {t.params} → val={val_acc:.1%}, test={test_acc:.1%}, mean={t.value:.1%}")
+
+    print(f"\nBest params: {study.best_params}")
+    print(f"Best mean accuracy: {study.best_value:.1%}")
 
 
 def cmd_tune_lstm(args, config: Config):
@@ -599,18 +616,20 @@ def cmd_tune_lstm(args, config: Config):
     val_samples = normalizer.transform_samples(val_samples)
     test_samples = normalizer.transform_samples(test_samples)
 
-    max_epochs = args.max_epochs
-    search_space = {
-        "lr": [0.0005, 0.001, 0.005],
-        "hidden_size": [32, 64, 128],
-        "epochs": [e for e in [50, 100, 200] if e <= max_epochs],
-    }
+    n_trials = args.n_trials
+    print(f"Running {n_trials} Optuna trials...\n")
 
-    results = tune_lstm(train_samples, val_samples, test_samples, search_space=search_space)
+    study = tune_lstm(train_samples, val_samples, test_samples, n_trials=n_trials)
 
-    print(f"\nTop 5 results:")
-    for i, r in enumerate(results[:5]):
-        print(f"  {i+1}. {r.hyperparams} → val={r.val_acc:.1%}, test={r.test_acc:.1%}")
+    top_trials = sorted(study.trials, key=lambda t: t.value, reverse=True)[:5]
+    print(f"\nTop 5 trials (ranked by mean of val + test):")
+    for i, t in enumerate(top_trials):
+        val_acc = t.user_attrs.get("val_acc", 0.0)
+        test_acc = t.user_attrs.get("test_acc", 0.0)
+        print(f"  {i+1}. {t.params} → val={val_acc:.1%}, test={test_acc:.1%}, mean={t.value:.1%}")
+
+    print(f"\nBest params: {study.best_params}")
+    print(f"Best mean accuracy: {study.best_value:.1%}")
 
 
 def cmd_predict(args, config: Config):
@@ -682,55 +701,37 @@ def cmd_predict(args, config: Config):
         normalizer = FeatureNormalizer()
         normalizer.mean = norm_data["mean"]
         normalizer.std = norm_data["std"]
+        margin_scale = float(norm_data["margin_scale"][0]) if "margin_scale" in norm_data else 1.0
 
-        model = MatchPredictor(len(normalizer.mean), hidden_dims=[64])
-        model.load(f"{prefix}_mlp.pt")
-        model.train(False)
+        input_dim = len(normalizer.mean)
+        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        win_model.load(f"{prefix}_win.pt")
+        win_model.train(False)
+
+        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        margin_model.load(f"{prefix}_margin.pt")
+        margin_model.train(False)
 
         now = datetime.now()
-        home_stats = builder._compute_team_stats(home_team.id, now)
-        away_stats = builder._compute_team_stats(away_team.id, now)
+        synthetic = Match(
+            id=-1, date=now,
+            home_team_id=home_team.id, away_team_id=away_team.id,
+            home_score=0, away_score=0,
+            venue=None, round=None,
+        )
+        features = builder.build_features(synthetic)
 
-        if home_stats is None or away_stats is None:
+        if features is None:
             print("Error: Insufficient match history for prediction")
             sys.exit(1)
-
-        is_local = builder._is_local_derby(home_team.id, away_team.id)
-        log5 = builder._log5_prob(home_stats.win_rate, away_stats.win_rate)
-
-        features = MatchFeatures(
-            win_rate_diff=home_stats.win_rate - away_stats.win_rate,
-            margin_diff=home_stats.margin_avg - away_stats.margin_avg,
-            pythagorean_diff=home_stats.pythagorean - away_stats.pythagorean,
-            log5=log5,
-            is_local=1.0 if is_local else 0.0,
-            home_win_rate=home_stats.win_rate,
-            home_margin_avg=home_stats.margin_avg,
-            home_pythagorean=home_stats.pythagorean,
-            home_pf_avg=home_stats.pf_avg,
-            home_pa_avg=home_stats.pa_avg,
-            away_win_rate=away_stats.win_rate,
-            away_margin_avg=away_stats.margin_avg,
-            away_pythagorean=away_stats.pythagorean,
-            away_pf_avg=away_stats.pf_avg,
-            away_pa_avg=away_stats.pa_avg,
-            home_elo=home_stats.elo,
-            away_elo=away_stats.elo,
-            elo_diff=home_stats.elo - away_stats.elo,
-            home_streak=home_stats.streak / 5.0,
-            away_streak=away_stats.streak / 5.0,
-            home_last5_win_rate=home_stats.last_5_wins / 5.0,
-            away_last5_win_rate=away_stats.last_5_wins / 5.0,
-        )
 
         X = features.to_array().reshape(1, -1)
         X_norm = normalizer.transform(X)
         X_t = torch.tensor(X_norm, dtype=torch.float32)
 
         with torch.no_grad():
-            preds = model.predict(X_t)
-        win_prob = preds["win_prob"].item()
-        margin = preds["margin"].item()
+            win_prob = win_model.predict_proba(X_t).item()
+            margin = margin_model.predict(X_t).item() * margin_scale
 
     winner = home_team.name if win_prob >= 0.5 else away_team.name
     prob = win_prob if win_prob >= 0.5 else 1 - win_prob
@@ -823,7 +824,7 @@ def cmd_predict_next(args, config: Config):
             return preds["win_prob"].item(), preds["margin"].item()
     else:
         if not output_json and not output_csv:
-            print("Loading MLP model...")
+            print("Loading MLP models...")
         builder = FeatureBuilder(matches, teams)
         for match in sorted(matches, key=lambda m: m.date):
             builder.build_features(match)
@@ -833,49 +834,35 @@ def cmd_predict_next(args, config: Config):
         normalizer = FeatureNormalizer()
         normalizer.mean = norm_data["mean"]
         normalizer.std = norm_data["std"]
+        margin_scale = float(norm_data["margin_scale"][0]) if "margin_scale" in norm_data else 1.0
 
-        model = MatchPredictor(len(normalizer.mean), hidden_dims=[64])
-        model.load(f"{prefix}_mlp.pt")
-        model.train(False)
+        input_dim = len(normalizer.mean)
+        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        win_model.load(f"{prefix}_win.pt")
+        win_model.train(False)
+
+        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        margin_model.load(f"{prefix}_margin.pt")
+        margin_model.train(False)
 
         def predict_fn(home_team, away_team):
             now = datetime.now()
-            home_stats = builder._compute_team_stats(home_team.id, now)
-            away_stats = builder._compute_team_stats(away_team.id, now)
-            if home_stats is None or away_stats is None:
-                return None
-            is_local = builder._is_local_derby(home_team.id, away_team.id)
-            log5 = builder._log5_prob(home_stats.win_rate, away_stats.win_rate)
-            features = MatchFeatures(
-                win_rate_diff=home_stats.win_rate - away_stats.win_rate,
-                margin_diff=home_stats.margin_avg - away_stats.margin_avg,
-                pythagorean_diff=home_stats.pythagorean - away_stats.pythagorean,
-                log5=log5,
-                is_local=1.0 if is_local else 0.0,
-                home_win_rate=home_stats.win_rate,
-                home_margin_avg=home_stats.margin_avg,
-                home_pythagorean=home_stats.pythagorean,
-                home_pf_avg=home_stats.pf_avg,
-                home_pa_avg=home_stats.pa_avg,
-                away_win_rate=away_stats.win_rate,
-                away_margin_avg=away_stats.margin_avg,
-                away_pythagorean=away_stats.pythagorean,
-                away_pf_avg=away_stats.pf_avg,
-                away_pa_avg=away_stats.pa_avg,
-                home_elo=home_stats.elo,
-                away_elo=away_stats.elo,
-                elo_diff=home_stats.elo - away_stats.elo,
-                home_streak=home_stats.streak / 5.0,
-                away_streak=away_stats.streak / 5.0,
-                home_last5_win_rate=home_stats.last_5_wins / 5.0,
-                away_last5_win_rate=away_stats.last_5_wins / 5.0,
+            synthetic = Match(
+                id=-1, date=now,
+                home_team_id=home_team.id, away_team_id=away_team.id,
+                home_score=0, away_score=0, home_win=True,
+                venue=None, round=None,
             )
+            features = builder.build_features(synthetic)
+            if features is None:
+                return None
             X = features.to_array().reshape(1, -1)
             X_norm = normalizer.transform(X)
             X_t = torch.tensor(X_norm, dtype=torch.float32)
             with torch.no_grad():
-                preds = model.predict(X_t)
-            return preds["win_prob"].item(), preds["margin"].item()
+                wp = win_model.predict_proba(X_t).item()
+                mg = margin_model.predict(X_t).item() * margin_scale
+            return wp, mg
 
     # Find DB teams and predict
     def find_db_team(name):
@@ -959,23 +946,28 @@ def cmd_model_validate(args, config: Config):
     prefix = model_prefix(config)
     errors = []
 
-    # MLP
-    mlp_path = Path(f"{prefix}_mlp.pt")
+    # MLP (win + margin)
+    win_path = Path(f"{prefix}_win.pt")
+    margin_path = Path(f"{prefix}_margin.pt")
     norm_path = Path(f"{prefix}_mlp_norm.npz")
-    if mlp_path.exists() and norm_path.exists():
+    if win_path.exists() and margin_path.exists() and norm_path.exists():
         try:
             norm_data = np.load(norm_path)
             normalizer = FeatureNormalizer()
             normalizer.mean = norm_data["mean"]
             normalizer.std = norm_data["std"]
-            model = MatchPredictor(len(normalizer.mean), hidden_dims=[64])
-            model.load(mlp_path)
-            print(f"  MLP model: OK ({len(normalizer.mean)} features)")
+            input_dim = len(normalizer.mean)
+            win_m = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+            win_m.load(win_path)
+            margin_m = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+            margin_m.load(margin_path)
+            print(f"  MLP win model: OK ({input_dim} features)")
+            print(f"  MLP margin model: OK ({input_dim} features)")
         except Exception as e:
             errors.append(f"MLP: {e}")
-            print(f"  MLP model: FAILED ({e})")
+            print(f"  MLP models: FAILED ({e})")
     else:
-        print("  MLP model: not found")
+        print("  MLP models: not found")
 
     # LSTM
     lstm_path = Path(f"{prefix}_lstm.pt")
