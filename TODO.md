@@ -20,7 +20,7 @@
 ## Sequence Models (LSTM/Transformer)
 - [x] **Bidirectional LSTMs:** `SequenceLSTM` with `bidirectional=True`, temporal attention over BiLSTM outputs
 - [ ] **Transformer Architecture:** Replace or augment the LSTM backbone with a Transformer/Self-Attention encoder to capture long-range dependencies in a team's sequence history.
-- [ ] **Recurrent Dropout & Masking:** Improve variable-length sequence handling and prevent overfitting with proper RNN masking and sequence dropout techniques.
+- [x] **Recurrent Dropout & Masking:** `pack_padded_sequence` for variable-length LSTM, masked attention (padding → -inf), sequence lengths tracked in `SequenceDataset`
 
 ## Feature Engineering Improvements
 

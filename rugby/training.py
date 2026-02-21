@@ -426,8 +426,13 @@ def evaluate_win_model(model: WinClassifier, X: np.ndarray, y: np.ndarray) -> Di
 # Sequence model training (LSTM and Transformer)
 # =============================================================================
 
+def _seq_length(history: np.ndarray) -> int:
+    """Count non-padding timesteps (rows where any feature is non-zero)."""
+    return int(np.any(history != 0, axis=1).sum())
+
+
 class SequenceDataset(Dataset):
-    """Dataset for sequence models."""
+    """Dataset for sequence models with variable-length sequence support."""
 
     def __init__(self, samples: List[SequenceDataSample], augment: bool = False):
         self.samples = samples
@@ -449,6 +454,8 @@ class SequenceDataset(Dataset):
                 'comparison': torch.tensor(-s.comparison, dtype=torch.float32),
                 'home_win': torch.tensor(1.0 - home_win, dtype=torch.float32),
                 'margin': torch.tensor(margin, dtype=torch.float32),
+                'home_length': torch.tensor(_seq_length(s.away_history), dtype=torch.long),
+                'away_length': torch.tensor(_seq_length(s.home_history), dtype=torch.long),
             }
 
         return {
@@ -457,6 +464,8 @@ class SequenceDataset(Dataset):
             'comparison': torch.tensor(s.comparison, dtype=torch.float32),
             'home_win': torch.tensor(home_win, dtype=torch.float32),
             'margin': torch.tensor(margin, dtype=torch.float32),
+            'home_length': torch.tensor(_seq_length(s.home_history), dtype=torch.long),
+            'away_length': torch.tensor(_seq_length(s.away_history), dtype=torch.long),
         }
 
 
@@ -535,20 +544,13 @@ def train_sequence_model(
             optimizer.zero_grad()
 
             # Forward pass
-            if use_team_ids and hasattr(model, 'team_embedding'):
-                win_logit, margin_pred = model(
-                    batch['home_history'],
-                    batch['away_history'],
-                    batch['comparison'],
-                    batch['home_team_id'],
-                    batch['away_team_id'],
-                )
-            else:
-                win_logit, margin_pred = model(
-                    batch['home_history'],
-                    batch['away_history'],
-                    batch['comparison'],
-                )
+            win_logit, margin_pred = model(
+                batch['home_history'],
+                batch['away_history'],
+                batch['comparison'],
+                home_lengths=batch.get('home_length'),
+                away_lengths=batch.get('away_length'),
+            )
 
             # Label smoothing: shift targets toward 0.5
             smooth_target = batch['home_win'] * (1 - label_smoothing) + 0.5 * label_smoothing
@@ -583,20 +585,13 @@ def train_sequence_model(
 
             with torch.no_grad():
                 for batch in val_loader:
-                    if use_team_ids and hasattr(model, 'team_embedding'):
-                        win_logit, margin_pred = model(
-                            batch['home_history'],
-                            batch['away_history'],
-                            batch['comparison'],
-                            batch['home_team_id'],
-                            batch['away_team_id'],
-                        )
-                    else:
-                        win_logit, margin_pred = model(
-                            batch['home_history'],
-                            batch['away_history'],
-                            batch['comparison'],
-                        )
+                    win_logit, margin_pred = model(
+                        batch['home_history'],
+                        batch['away_history'],
+                        batch['comparison'],
+                        home_lengths=batch.get('home_length'),
+                        away_lengths=batch.get('away_length'),
+                    )
 
                     # Use unsmoothed targets for validation loss
                     win_loss = bce_loss(win_logit.squeeze(-1), batch['home_win'])
@@ -662,20 +657,13 @@ def evaluate_sequence_model(
     with torch.no_grad():
         batch = next(iter(loader))
 
-        if use_team_ids and hasattr(model, 'team_embedding'):
-            win_logit, margin_pred = model(
-                batch['home_history'],
-                batch['away_history'],
-                batch['comparison'],
-                batch['home_team_id'],
-                batch['away_team_id'],
-            )
-        else:
-            win_logit, margin_pred = model(
-                batch['home_history'],
-                batch['away_history'],
-                batch['comparison'],
-            )
+        win_logit, margin_pred = model(
+            batch['home_history'],
+            batch['away_history'],
+            batch['comparison'],
+            home_lengths=batch.get('home_length'),
+            away_lengths=batch.get('away_length'),
+        )
 
         probs = torch.sigmoid(win_logit.squeeze(-1))
         preds = (probs >= 0.5).float()

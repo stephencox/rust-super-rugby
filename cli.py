@@ -801,11 +801,15 @@ def cmd_predict(args, config: Config):
         away_seq_norm = normalizer.transform_sequence(away_seq)
         comp_norm = normalizer.transform_comparison(comparison)
 
+        home_len = int(np.any(home_seq_norm != 0, axis=1).sum())
+        away_len = int(np.any(away_seq_norm != 0, axis=1).sum())
         with torch.no_grad():
             preds = model.predict(
                 torch.tensor(home_seq_norm, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(away_seq_norm, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(comp_norm, dtype=torch.float32).unsqueeze(0),
+                home_lengths=torch.tensor([home_len], dtype=torch.long),
+                away_lengths=torch.tensor([away_len], dtype=torch.long),
             )
         win_prob = preds["win_prob"].item()
         margin = preds["margin"].item()
@@ -915,11 +919,15 @@ def cmd_predict_next(args, config: Config):
             home_seq_norm = normalizer.transform_sequence(home_seq)
             away_seq_norm = normalizer.transform_sequence(away_seq)
             comp_norm = normalizer.transform_comparison(comparison)
+            home_len = int(np.any(home_seq_norm != 0, axis=1).sum())
+            away_len = int(np.any(away_seq_norm != 0, axis=1).sum())
             with torch.no_grad():
                 preds = model.predict(
                     torch.tensor(home_seq_norm, dtype=torch.float32).unsqueeze(0),
                     torch.tensor(away_seq_norm, dtype=torch.float32).unsqueeze(0),
                     torch.tensor(comp_norm, dtype=torch.float32).unsqueeze(0),
+                    home_lengths=torch.tensor([home_len], dtype=torch.long),
+                    away_lengths=torch.tensor([away_len], dtype=torch.long),
                 )
             return preds["win_prob"].item(), preds["margin"].item()
     else:

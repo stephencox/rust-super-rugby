@@ -198,6 +198,7 @@ class SequenceLSTM(nn.Module):
 
     Processes home and away team history through a shared BiLSTM, then
     combines the representations with comparison features for prediction.
+    Supports variable-length sequences via pack_padded_sequence and masked attention.
 
     Architecture:
     1. Process home team history through BiLSTM -> home_repr
@@ -259,27 +260,58 @@ class SequenceLSTM(nn.Module):
         self.margin_fc = nn.Linear(fc_input_size + 1, hidden_size)
         self.margin_head = nn.Linear(hidden_size, 1)
 
-    def attention(self, lstm_out: torch.Tensor) -> torch.Tensor:
+    def _make_mask(self, lengths: torch.Tensor, max_len: int) -> torch.Tensor:
+        """Create boolean mask [batch, max_len] where True = valid position."""
+        return torch.arange(max_len, device=lengths.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+    def attention(self, lstm_out: torch.Tensor,
+                  mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Temporal attention over LSTM outputs.
+        Temporal attention over LSTM outputs with optional padding mask.
 
         Args:
             lstm_out: LSTM outputs [batch, seq_len, hidden]
+            mask: Boolean mask [batch, seq_len] where True = valid (optional)
 
         Returns:
             Context vector [batch, hidden]
         """
         energy = torch.tanh(self.attn_fc(lstm_out))       # [B, seq_len, hidden]
         scores = self.attn_score(energy).squeeze(-1)       # [B, seq_len]
+        if mask is not None:
+            scores = scores.masked_fill(~mask, float('-inf'))
         weights = torch.softmax(scores, dim=1)             # [B, seq_len]
         context = (weights.unsqueeze(-1) * lstm_out).sum(dim=1)  # [B, hidden]
         return context
+
+    def _process_sequence(self, history: torch.Tensor,
+                          lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Process a team history through LSTM with optional packing and masked attention."""
+        history = self.input_norm(history)
+        seq_len = history.size(1)
+
+        if lengths is not None:
+            # Pack for efficient LSTM processing (skip padding computation)
+            packed = nn.utils.rnn.pack_padded_sequence(
+                history, lengths.cpu().clamp(min=1), batch_first=True, enforce_sorted=False,
+            )
+            packed_out, _ = self.lstm(packed)
+            lstm_out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True,
+                                                           total_length=seq_len)
+            mask = self._make_mask(lengths, seq_len)
+        else:
+            lstm_out, _ = self.lstm(history)
+            mask = None
+
+        return self.dropout(self.attention(lstm_out, mask))
 
     def forward(
         self,
         home_history: torch.Tensor,
         away_history: torch.Tensor,
         comparison: torch.Tensor,
+        home_lengths: Optional[torch.Tensor] = None,
+        away_lengths: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass.
@@ -288,21 +320,14 @@ class SequenceLSTM(nn.Module):
             home_history: Home team history [batch, seq_len, input_dim]
             away_history: Away team history [batch, seq_len, input_dim]
             comparison: Comparison features [batch, comparison_dim]
+            home_lengths: Actual sequence lengths for home team [batch] (optional)
+            away_lengths: Actual sequence lengths for away team [batch] (optional)
 
         Returns:
             Tuple of (win_logit, margin), each [batch, 1]
         """
-        # Normalize input features
-        home_history = self.input_norm(home_history)
-        away_history = self.input_norm(away_history)
-
-        # Process home team history through LSTM with temporal attention
-        home_out, _ = self.lstm(home_history)
-        home_repr = self.dropout(self.attention(home_out))
-
-        # Process away team history through same LSTM with temporal attention
-        away_out, _ = self.lstm(away_history)
-        away_repr = self.dropout(self.attention(away_out))
+        home_repr = self._process_sequence(home_history, home_lengths)
+        away_repr = self._process_sequence(away_history, away_lengths)
 
         # Concatenate: [home_repr, away_repr, comparison]
         combined = torch.cat([home_repr, away_repr, comparison], dim=1)
@@ -324,10 +349,14 @@ class SequenceLSTM(nn.Module):
         home_history: torch.Tensor,
         away_history: torch.Tensor,
         comparison: torch.Tensor,
+        home_lengths: Optional[torch.Tensor] = None,
+        away_lengths: Optional[torch.Tensor] = None,
     ) -> dict:
         """Get predictions as a dictionary."""
         with torch.no_grad():
-            win_logit, margin = self.forward(home_history, away_history, comparison)
+            win_logit, margin = self.forward(
+                home_history, away_history, comparison, home_lengths, away_lengths,
+            )
             win_prob = torch.sigmoid(win_logit)
             return {
                 'win_prob': win_prob.squeeze(-1),
