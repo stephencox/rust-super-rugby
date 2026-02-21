@@ -9,7 +9,7 @@
 
 ### Medium Priority
 - [x] **Label Smoothing:** label_smoothing=0.05 in train_win_model, smooths targets toward 0.5
-- [x] **H2H Features:** h2h_win_rate and h2h_margin_avg added to MatchFeatures (24-dim)
+- [x] **H2H Features:** h2h_win_rate and h2h_margin_avg added to MatchFeatures
 - [x] **Residual Connections:** ResidualBlock with linear projection skip connections in WinClassifier/MarginRegressor
 
 ### Future Enhancements
@@ -26,16 +26,16 @@
 
 ### Data Acquisition
 - [ ] **Scraper Enhancement (Tries):** Update Wikipedia and Six Nations scrapers to extract try counts (`home_tries`, `away_tries`) for more granular offensive metrics.
-- [ ] **Bye Week Logic:** Explicitly handle bye weeks in the `is_after_bye` binary feature (e.g., rest days >= 13).
+- [x] **Bye Week Logic:** `home_is_after_bye` / `away_is_after_bye` binary features (rest >= 13 days) in MatchFeatures
 - [ ] **Lassen Scraper Implementation:** Flesh out `lassen.py` to fetch match round numbers and local times from lassen.co.nz.
 - [ ] **SA Rugby Scraper Implementation:** Flesh out `sarugby.py` to get detailed match data from sarugby.co.za.
 
 ### Feature Expansion
-- [ ] **Travel & Timezone Fatigue:** Populate `travel_hours` in `SequenceFeatureBuilder` and `MatchFeatures` using the `timezone_offset` from the `Team` table.
-- [ ] **Outcome-based H2H Metrics:** Add `h2h_win_rate` and `h2h_margin_avg` to both feature builders to capture specific tactical mismatches.
+- [x] **Travel & Timezone Fatigue:** `travel_hours` in MatchFeatures using `timezone_offset` from Team table
+- [x] **Outcome-based H2H Metrics:** `h2h_win_rate` and `h2h_margin_avg` in MatchFeatures (FeatureBuilder)
 - [ ] **Venue-Specific Advantage:** Track and incorporate the home team's historical performance at specific `venue` locations (e.g., Eden Park factor) rather than just a binary `is_home`.
-- [ ] **Strength of Schedule (SoS) Adjustment:** Implement Elo-adjusted margins to reward performance against top-tier teams and penalize "flat-track bullies."
-- [ ] **Consistency Metric for MLP:** Add `margin_std` (consistency) to `MatchFeatures` to help the MLP weigh the reliability of recent form.
+- [x] **Strength of Schedule (SoS) Adjustment:** `home_sos` / `away_sos` (avg opponent Elo) in MatchFeatures
+- [x] **Consistency Metric for MLP:** `home_consistency` / `away_consistency` (inverse margin stdev) in MatchFeatures
 - [ ] **Weather Conditions:** Scrape historical weather data for match locations (rain, wind impact points scored and margin).
 - [ ] **Player/Roster Data:** Track key absences (e.g., missing top performant fly-half/goal kicker) or injuries to account for dramatic squad strength changes.
 

@@ -24,6 +24,12 @@ class TeamStats:
     # Elo rating
     elo: float = 1500.0
 
+    # Consistency (inverse of margin stdev, 0-1)
+    consistency: float = 0.5
+
+    # Strength of schedule (avg Elo of opponents)
+    sos: float = 0.0
+
 
 @dataclass
 class MatchFeatures:
@@ -64,6 +70,21 @@ class MatchFeatures:
     h2h_win_rate: float = 0.5
     h2h_margin_avg: float = 0.0
 
+    # Context features (1)
+    travel_hours: float = 0.0  # abs(home_tz - away_tz), symmetric
+
+    # Per-team consistency (2)
+    home_consistency: float = 0.5
+    away_consistency: float = 0.5
+
+    # Bye week indicators (2)
+    home_is_after_bye: float = 0.0
+    away_is_after_bye: float = 0.0
+
+    # Strength of schedule (2)
+    home_sos: float = 0.0
+    away_sos: float = 0.0
+
     def to_array(self) -> np.ndarray:
         """Convert to numpy array."""
         return np.array([
@@ -97,6 +118,17 @@ class MatchFeatures:
             # H2H (2)
             self.h2h_win_rate,
             self.h2h_margin_avg,
+            # Context (1)
+            self.travel_hours,
+            # Consistency (2)
+            self.home_consistency,
+            self.away_consistency,
+            # Bye (2)
+            self.home_is_after_bye,
+            self.away_is_after_bye,
+            # SoS (2)
+            self.home_sos,
+            self.away_sos,
         ], dtype=np.float32)
 
     @staticmethod
@@ -109,11 +141,15 @@ class MatchFeatures:
             'home_elo', 'away_elo', 'elo_diff',
             'home_streak', 'away_streak', 'home_last5_win_rate', 'away_last5_win_rate',
             'h2h_win_rate', 'h2h_margin_avg',
+            'travel_hours',
+            'home_consistency', 'away_consistency',
+            'home_is_after_bye', 'away_is_after_bye',
+            'home_sos', 'away_sos',
         ]
 
     @staticmethod
     def num_features() -> int:
-        return 24
+        return 31
 
 
 class FeatureBuilder:
@@ -168,16 +204,22 @@ class FeatureBuilder:
         streak_counting = True
         last_5_wins = 0
 
+        margins = []
+        opponent_ids = []
+
         for i, m in enumerate(recent):
             if m.home_team_id == team_id:
                 pf, pa = m.home_score, m.away_score
+                opponent_ids.append(m.away_team_id)
             else:
                 pf, pa = m.away_score, m.home_score
+                opponent_ids.append(m.home_team_id)
 
             won = pf > pa
             total_pf += pf
             total_pa += pa
             total_margin += (pf - pa)
+            margins.append(pf - pa)
 
             if won:
                 wins += 1
@@ -200,6 +242,14 @@ class FeatureBuilder:
         # Pythagorean expectation
         pythagorean = (pf_total ** 2.37) / (pf_total ** 2.37 + pa_total ** 2.37)
 
+        # Consistency: inverse of margin stdev, normalized to 0-1
+        margin_std = float(np.std(margins)) if len(margins) > 1 else 10.0
+        consistency = 1.0 / (1.0 + margin_std / 10.0)
+
+        # Strength of schedule: average Elo of recent opponents
+        opp_elos = [self.elo_ratings.get(oid, 1500.0) for oid in opponent_ids]
+        sos = float(np.mean(opp_elos)) if opp_elos else 1500.0
+
         return TeamStats(
             win_rate=wins / n,
             margin_avg=total_margin / n,
@@ -210,6 +260,8 @@ class FeatureBuilder:
             last_5_wins=last_5_wins,
             streak=streak,
             elo=self.elo_ratings[team_id],
+            consistency=consistency,
+            sos=sos,
         )
 
     @staticmethod
@@ -258,6 +310,13 @@ class FeatureBuilder:
         n = len(h2h_matches)
         return wins / n, total_margin / n
 
+    def _compute_rest_days(self, team_id: int, before_date: datetime) -> float:
+        """Compute days since last match for a team."""
+        history = [m for m in self.team_history[team_id] if m.date < before_date]
+        if not history:
+            return 7.0  # Default
+        return float((before_date - history[0].date).days)
+
     def build_features(self, match: Match) -> Optional[MatchFeatures]:
         """Build features for a match (using only data available before the match)."""
         home_stats = self._compute_team_stats(match.home_team_id, match.date)
@@ -271,6 +330,19 @@ class FeatureBuilder:
         h2h_win_rate, h2h_margin_avg = self._compute_h2h_stats(
             match.home_team_id, match.away_team_id, match.date
         )
+
+        # Travel hours: absolute timezone difference (symmetric)
+        home_team = self.teams.get(match.home_team_id)
+        away_team = self.teams.get(match.away_team_id)
+        home_tz = home_team.timezone_offset if home_team and home_team.timezone_offset is not None else 0.0
+        away_tz = away_team.timezone_offset if away_team and away_team.timezone_offset is not None else 0.0
+        travel_hours = abs(home_tz - away_tz)
+
+        # Bye week: rest >= 13 days
+        home_rest = self._compute_rest_days(match.home_team_id, match.date)
+        away_rest = self._compute_rest_days(match.away_team_id, match.date)
+        home_is_after_bye = 1.0 if home_rest >= 13 else 0.0
+        away_is_after_bye = 1.0 if away_rest >= 13 else 0.0
 
         return MatchFeatures(
             # Differentials
@@ -303,6 +375,17 @@ class FeatureBuilder:
             # H2H
             h2h_win_rate=h2h_win_rate,
             h2h_margin_avg=h2h_margin_avg,
+            # Context
+            travel_hours=travel_hours,
+            # Consistency
+            home_consistency=home_stats.consistency,
+            away_consistency=away_stats.consistency,
+            # Bye
+            home_is_after_bye=home_is_after_bye,
+            away_is_after_bye=away_is_after_bye,
+            # SoS
+            home_sos=home_stats.sos,
+            away_sos=away_stats.sos,
         )
 
     def process_match(self, match: Match):

@@ -2,6 +2,7 @@
 
 import sys
 from dataclasses import dataclass, field
+from typing import List
 from pathlib import Path
 
 if sys.version_info >= (3, 11):
@@ -15,11 +16,11 @@ else:
 
 @dataclass
 class TrainingConfig:
-    epochs: int = 200
-    batch_size: int = 32
-    learning_rate: float = 0.0005
+    epochs: int = 311
+    batch_size: int = 128
+    learning_rate: float = 5.9e-05
     weight_decay: float = 0.001
-    dropout: float = 0.3
+    dropout: float = 0.49
     early_stopping_patience: int = 50
 
 
@@ -30,12 +31,13 @@ class ModelConfig:
     n_cross_attn_layers: int = 1
     n_heads: int = 4
     max_history: int = 10
+    hidden_dims: List[int] = field(default_factory=lambda: [128, 64])
 
 
 @dataclass
 class LossConfig:
-    win_weight: float = 2.0
-    score_weight: float = 0.3
+    win_weight: float = 1.14
+    score_weight: float = 1.29
 
 
 @dataclass
@@ -91,6 +93,7 @@ class Config:
                 n_cross_attn_layers=m.get("n_cross_attn_layers", config.model.n_cross_attn_layers),
                 n_heads=m.get("n_heads", config.model.n_heads),
                 max_history=m.get("max_history", config.model.max_history),
+                hidden_dims=m.get("hidden_dims", config.model.hidden_dims),
             )
 
         if "loss" in section:
