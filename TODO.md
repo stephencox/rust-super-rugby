@@ -14,7 +14,7 @@
 
 ### Future Enhancements
 - [x] **Uncertainty Estimation (Quantile Regression):** `MarginRegressor` outputs 3 quantiles (p10/p50/p90) with pinball loss, monotonicity enforced via softplus, 80% CI shown in predictions
-- [ ] **Gated Linear Units (GLU):** Experiment with gating mechanisms to allow the model to dynamically weight input features based on the matchup context.
+- [x] **Gated Linear Units (GLU):** `ResidualBlock` uses `nn.functional.glu` by default — splits linear output into content + sigmoid gate for dynamic feature weighting
 - [x] **Probability Calibration:** Platt scaling (LBFGS on validation logits) stored in checkpoint, applied at inference
 
 ## Sequence Models (LSTM/Transformer)

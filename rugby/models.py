@@ -8,12 +8,20 @@ from typing import List, Optional, Tuple
 
 
 class ResidualBlock(nn.Module):
-    """A single residual MLP block: Linear -> [BN] -> ReLU -> [Dropout] + skip."""
+    """A single residual MLP block with optional GLU gating.
+
+    Standard: Linear -> [BN] -> ReLU -> [Dropout] + skip
+    GLU mode: Linear(2x) -> GLU -> [BN] -> [Dropout] + skip
+    """
 
     def __init__(self, in_dim: int, out_dim: int, dropout: float = 0.0,
-                 use_batchnorm: bool = False):
+                 use_batchnorm: bool = False, use_glu: bool = True):
         super().__init__()
-        self.linear = nn.Linear(in_dim, out_dim)
+        self.use_glu = use_glu
+        if use_glu:
+            self.linear = nn.Linear(in_dim, out_dim * 2)
+        else:
+            self.linear = nn.Linear(in_dim, out_dim)
         self.bn = nn.BatchNorm1d(out_dim) if use_batchnorm else None
         self.dropout = nn.Dropout(dropout) if dropout > 0 else None
         self.proj = nn.Linear(in_dim, out_dim, bias=False) if in_dim != out_dim else None
@@ -21,9 +29,12 @@ class ResidualBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = self.proj(x) if self.proj is not None else x
         h = self.linear(x)
+        if self.use_glu:
+            h = nn.functional.glu(h, dim=-1)
+        else:
+            h = torch.relu(h)
         if self.bn is not None:
             h = self.bn(h)
-        h = torch.relu(h)
         if self.dropout is not None:
             h = self.dropout(h)
         return h + residual
