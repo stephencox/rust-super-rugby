@@ -15,7 +15,7 @@
 ### Future Enhancements
 - [ ] **Uncertainty Estimation (Quantile Regression):** Transition the margin regressor to predict 10th, 50th, and 90th percentiles to provide a confidence interval for score predictions.
 - [ ] **Gated Linear Units (GLU):** Experiment with gating mechanisms to allow the model to dynamically weight input features based on the matchup context.
-- [ ] **Probability Calibration:** Implement Platt scaling or Isotonic regression to ensure predicted win probabilities are well-calibrated.
+- [x] **Probability Calibration:** Platt scaling (LBFGS on validation logits) stored in checkpoint, applied at inference
 
 ## Sequence Models (LSTM/Transformer)
 - [ ] **Bidirectional LSTMs:** Update `SequenceLSTM` to be bidirectional to capture patterns more effectively.

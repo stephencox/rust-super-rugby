@@ -45,6 +45,7 @@ from rugby.training import (
     train_win_model,
     train_margin_model,
     evaluate_win_model,
+    fit_platt_scaling,
     train_sequence_model,
     evaluate_sequence_model,
 )
@@ -441,6 +442,12 @@ def cmd_train(args, config: Config):
     if X_val_norm is not None:
         print(f"\n  Best validation MAE: {margin_history['best_val_mae']:.1f} points")
 
+    # Platt scaling calibration on validation set
+    platt_a, platt_b = 1.0, 0.0
+    if X_val_norm is not None:
+        platt_a, platt_b = fit_platt_scaling(win_model, X_val_norm, y_win_val)
+        print(f"\n  Platt scaling: a={platt_a:.3f}, b={platt_b:.3f}")
+
     prefix = model_prefix(config)
     prefix.parent.mkdir(parents=True, exist_ok=True)
 
@@ -457,6 +464,8 @@ def cmd_train(args, config: Config):
         'hidden_dims': config.model.hidden_dims,
         'dropout': config.training.dropout,
         'input_dim': X_train.shape[1],
+        'platt_a': platt_a,
+        'platt_b': platt_b,
     }
     mlp_path = f"{prefix}_mlp.pt"
     torch.save(checkpoint, mlp_path)
@@ -687,7 +696,7 @@ def cmd_tune_lstm(args, config: Config):
 def load_mlp_checkpoint(prefix: Path, config: Config):
     """Load MLP models, normalizer, and metadata from unified checkpoint.
 
-    Returns (win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams).
+    Returns (win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b).
     """
     mlp_path = Path(f"{prefix}_mlp.pt")
     ckpt = torch.load(mlp_path, weights_only=False)
@@ -701,6 +710,8 @@ def load_mlp_checkpoint(prefix: Path, config: Config):
     hidden_dims = ckpt.get('hidden_dims', config.model.hidden_dims)
     dropout = ckpt.get('dropout', config.training.dropout)
     input_dim = ckpt.get('input_dim', len(normalizer.mean))
+    platt_a = ckpt.get('platt_a', 1.0)
+    platt_b = ckpt.get('platt_b', 0.0)
 
     team_to_idx = {}
     for i, tid in enumerate(ckpt.get('team_to_idx_keys', [])):
@@ -716,7 +727,7 @@ def load_mlp_checkpoint(prefix: Path, config: Config):
     margin_model.load_state_dict(ckpt['margin_model_state'])
     margin_model.train(False)
 
-    return win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams
+    return win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b
 
 
 def load_lstm_checkpoint(prefix: Path, config: Config):
@@ -796,7 +807,7 @@ def cmd_predict(args, config: Config):
         win_prob = preds["win_prob"].item()
         margin = preds["margin"].item()
     else:
-        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams = \
+        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b = \
             load_mlp_checkpoint(prefix, config)
 
         builder = FeatureBuilder(matches, teams)
@@ -825,7 +836,8 @@ def cmd_predict(args, config: Config):
         away_id_t = torch.tensor([team_to_idx.get(away_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
 
         with torch.no_grad():
-            win_prob = win_model.predict_proba(X_t, home_id_t, away_id_t).item()
+            logits = win_model(X_t, home_id_t, away_id_t)
+            win_prob = torch.sigmoid(platt_a * logits + platt_b).item()
             margin = margin_model.predict(X_t, home_id_t, away_id_t).item() * margin_scale
 
     winner = home_team.name if win_prob >= 0.5 else away_team.name
@@ -910,7 +922,7 @@ def cmd_predict_next(args, config: Config):
     else:
         if not output_json and not output_csv:
             print("Loading MLP models...")
-        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams = \
+        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b = \
             load_mlp_checkpoint(prefix, config)
 
         builder = FeatureBuilder(matches, teams)
@@ -935,7 +947,8 @@ def cmd_predict_next(args, config: Config):
             home_id_t = torch.tensor([team_to_idx.get(home_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
             away_id_t = torch.tensor([team_to_idx.get(away_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
             with torch.no_grad():
-                wp = win_model.predict_proba(X_t, home_id_t, away_id_t).item()
+                logits = win_model(X_t, home_id_t, away_id_t)
+                wp = torch.sigmoid(platt_a * logits + platt_b).item()
                 mg = margin_model.predict(X_t, home_id_t, away_id_t).item() * margin_scale
             return wp, mg
 
@@ -1025,11 +1038,12 @@ def cmd_model_validate(args, config: Config):
     mlp_path = Path(f"{prefix}_mlp.pt")
     if mlp_path.exists():
         try:
-            win_m, margin_m, normalizer, margin_scale, team_to_idx, num_teams = \
+            win_m, margin_m, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b = \
                 load_mlp_checkpoint(prefix, config)
             input_dim = len(normalizer.mean)
             embed_info = f", {num_teams} teams, embed_dim={win_m.team_embed_dim}" if num_teams > 0 else ""
-            print(f"  MLP win model: OK ({input_dim} features{embed_info})")
+            platt_info = f", platt=({platt_a:.3f}, {platt_b:.3f})" if platt_a != 1.0 or platt_b != 0.0 else ""
+            print(f"  MLP win model: OK ({input_dim} features{embed_info}{platt_info})")
             print(f"  MLP margin model: OK ({input_dim} features{embed_info})")
         except Exception as e:
             errors.append(f"MLP: {e}")

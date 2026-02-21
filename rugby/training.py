@@ -351,6 +351,42 @@ def train_margin_model(
     return model, history
 
 
+def fit_platt_scaling(
+    model: WinClassifier,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    lr: float = 0.01,
+    max_iter: int = 1000,
+) -> Tuple[float, float]:
+    """Fit Platt scaling parameters on validation logits.
+
+    Learns a, b such that calibrated_prob = sigmoid(a * logit + b).
+    Returns (a, b) as floats.
+    """
+    X_t = torch.tensor(X_val, dtype=torch.float32)
+    y_t = torch.tensor(y_val, dtype=torch.float32)
+
+    model.train(False)
+    with torch.no_grad():
+        logits = model(X_t)
+
+    # Fit a, b via gradient descent on BCE loss
+    a = torch.tensor(1.0, requires_grad=True)
+    b = torch.tensor(0.0, requires_grad=True)
+    optimizer = torch.optim.LBFGS([a, b], lr=lr, max_iter=max_iter)
+    criterion = nn.BCEWithLogitsLoss()
+
+    def closure():
+        optimizer.zero_grad()
+        calibrated = a * logits + b
+        loss = criterion(calibrated, y_t)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return a.item(), b.item()
+
+
 def evaluate_win_model(model: WinClassifier, X: np.ndarray, y: np.ndarray) -> Dict:
     """Evaluate win classification model."""
     X_t = torch.tensor(X, dtype=torch.float32)
