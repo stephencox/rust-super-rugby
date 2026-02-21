@@ -33,7 +33,7 @@
 ### Feature Expansion
 - [x] **Travel & Timezone Fatigue:** `travel_hours` in MatchFeatures using `timezone_offset` from Team table
 - [x] **Outcome-based H2H Metrics:** `h2h_win_rate` and `h2h_margin_avg` in MatchFeatures (FeatureBuilder)
-- [ ] **Venue-Specific Advantage:** Track and incorporate the home team's historical performance at specific `venue` locations (e.g., Eden Park factor) rather than just a binary `is_home`.
+- [x] **Venue-Specific Advantage:** `home_venue_win_rate` in MatchFeatures — home team's win rate at this venue (min 2 games, else 0.5)
 - [x] **Strength of Schedule (SoS) Adjustment:** `home_sos` / `away_sos` (avg opponent Elo) in MatchFeatures
 - [x] **Consistency Metric for MLP:** `home_consistency` / `away_consistency` (inverse margin stdev) in MatchFeatures
 - [ ] **Weather Conditions:** Scrape historical weather data for match locations (rain, wind impact points scored and margin).

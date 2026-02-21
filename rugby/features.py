@@ -85,6 +85,9 @@ class MatchFeatures:
     home_sos: float = 0.0
     away_sos: float = 0.0
 
+    # Venue advantage (1) — home team's win rate at this venue
+    home_venue_win_rate: float = 0.5
+
     def to_array(self) -> np.ndarray:
         """Convert to numpy array."""
         return np.array([
@@ -129,6 +132,8 @@ class MatchFeatures:
             # SoS (2)
             self.home_sos,
             self.away_sos,
+            # Venue (1)
+            self.home_venue_win_rate,
         ], dtype=np.float32)
 
     @staticmethod
@@ -145,11 +150,12 @@ class MatchFeatures:
             'home_consistency', 'away_consistency',
             'home_is_after_bye', 'away_is_after_bye',
             'home_sos', 'away_sos',
+            'home_venue_win_rate',
         ]
 
     @staticmethod
     def num_features() -> int:
-        return 31
+        return 32
 
 
 class FeatureBuilder:
@@ -317,6 +323,27 @@ class FeatureBuilder:
             return 7.0  # Default
         return float((before_date - history[0].date).days)
 
+    def _compute_venue_win_rate(self, team_id: int, venue: Optional[str],
+                                before_date: datetime) -> float:
+        """Compute a team's win rate at a specific venue (home games only)."""
+        if not venue:
+            return 0.5
+        venue_lower = venue.lower().strip()
+        wins = 0
+        total = 0
+        for m in self.team_history[team_id]:
+            if m.date >= before_date:
+                continue
+            if m.home_team_id != team_id:
+                continue  # Only home games at this venue
+            if m.venue and m.venue.lower().strip() == venue_lower:
+                total += 1
+                if m.home_win:
+                    wins += 1
+        if total < 2:
+            return 0.5  # Not enough venue history
+        return wins / total
+
     def build_features(self, match: Match) -> Optional[MatchFeatures]:
         """Build features for a match (using only data available before the match)."""
         home_stats = self._compute_team_stats(match.home_team_id, match.date)
@@ -343,6 +370,11 @@ class FeatureBuilder:
         away_rest = self._compute_rest_days(match.away_team_id, match.date)
         home_is_after_bye = 1.0 if home_rest >= 13 else 0.0
         away_is_after_bye = 1.0 if away_rest >= 13 else 0.0
+
+        # Venue-specific home advantage
+        home_venue_wr = self._compute_venue_win_rate(
+            match.home_team_id, match.venue, match.date
+        )
 
         return MatchFeatures(
             # Differentials
@@ -386,6 +418,8 @@ class FeatureBuilder:
             # SoS
             home_sos=home_stats.sos,
             away_sos=away_stats.sos,
+            # Venue
+            home_venue_win_rate=home_venue_wr,
         )
 
     def process_match(self, match: Match):

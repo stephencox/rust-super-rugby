@@ -12,7 +12,7 @@ from .models import WinClassifier, MarginRegressor, SequenceLSTM
 from .features import SequenceDataSample
 
 
-# Feature indices for home/away augmentation (31-dim MatchFeatures)
+# Feature indices for home/away augmentation (32-dim MatchFeatures)
 # Indices 0-3: differentials (negate)
 # Index 4: is_local (symmetric, keep)
 # Indices 5-9: home stats, 10-14: away stats (swap)
@@ -23,11 +23,13 @@ from .features import SequenceDataSample
 # Indices 25-26: home/away consistency (swap)
 # Indices 27-28: home/away is_after_bye (swap)
 # Indices 29-30: home/away sos (swap)
+# Index 31: home_venue_win_rate (reset to 0.5 on swap)
 _NEGATE_INDICES = [0, 1, 2, 3, 17, 23]
 _FLIP_INDICES = [22]  # x -> 1 - x
 _SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
                (15, 16), (18, 20), (19, 21),
                (25, 26), (27, 28), (29, 30)]
+_RESET_INDICES = {31: 0.5}  # Reset to neutral on swap
 
 
 def quantile_loss(pred: torch.Tensor, target: torch.Tensor,
@@ -84,6 +86,9 @@ class MLPDataset(Dataset):
             # Swap home/away stats
             for h, a in _SWAP_PAIRS:
                 x[h], x[a] = x[a].clone(), x[h].clone()
+            # Reset home-only features to neutral
+            for i, val in _RESET_INDICES.items():
+                x[i] = val
             # Flip win label (margin stays absolute)
             y = 1.0 - y
             # Swap team IDs

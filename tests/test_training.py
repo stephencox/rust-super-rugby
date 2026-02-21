@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from rugby.training import (
     MLPDataset, train_win_model, train_margin_model,
-    _NEGATE_INDICES, _FLIP_INDICES, _SWAP_PAIRS,
+    _NEGATE_INDICES, _FLIP_INDICES, _SWAP_PAIRS, _RESET_INDICES,
 )
 from rugby.models import WinClassifier, MarginRegressor
 from rugby.features import MatchFeatures
@@ -64,7 +64,8 @@ class TestMLPDataset:
         for h, a in _SWAP_PAIRS:
             swap.add(h)
             swap.add(a)
-        covered = negate | flip | swap
+        reset = set(_RESET_INDICES.keys())
+        covered = negate | flip | swap | reset
         # Remaining indices are symmetric (kept unchanged): is_local(4), travel_hours(24)
         uncovered = all_indices - covered
         # These should be symmetric features that don't need transformation

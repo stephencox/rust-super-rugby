@@ -34,17 +34,16 @@ def _make_matches():
 
 class TestMatchFeatures:
     def test_num_features(self):
-        assert MatchFeatures.num_features() == 31
+        assert MatchFeatures.num_features() == 32
 
     def test_to_array_length(self):
         f = MatchFeatures()
         arr = f.to_array()
-        assert len(arr) == 31
+        assert len(arr) == MatchFeatures.num_features()
         assert arr.dtype == np.float32
 
     def test_feature_names_length(self):
         names = MatchFeatures.feature_names()
-        assert len(names) == 31
         assert len(names) == MatchFeatures.num_features()
 
     def test_feature_names_unique(self):
@@ -75,7 +74,7 @@ class TestFeatureBuilder:
         fb = FeatureBuilder(matches, teams, min_history=3)
         X, y_win, y_hs, y_as = fb.build_dataset()
         assert isinstance(X, np.ndarray)
-        assert X.shape[1] == 31
+        assert X.shape[1] == MatchFeatures.num_features()
         assert len(y_win) == len(X)
 
     def test_min_history_filter(self):
