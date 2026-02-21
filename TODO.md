@@ -13,7 +13,7 @@
 - [x] **Residual Connections:** ResidualBlock with linear projection skip connections in WinClassifier/MarginRegressor
 
 ### Future Enhancements
-- [ ] **Uncertainty Estimation (Quantile Regression):** Transition the margin regressor to predict 10th, 50th, and 90th percentiles to provide a confidence interval for score predictions.
+- [x] **Uncertainty Estimation (Quantile Regression):** `MarginRegressor` outputs 3 quantiles (p10/p50/p90) with pinball loss, monotonicity enforced via softplus, 80% CI shown in predictions
 - [ ] **Gated Linear Units (GLU):** Experiment with gating mechanisms to allow the model to dynamically weight input features based on the matchup context.
 - [x] **Probability Calibration:** Platt scaling (LBFGS on validation logits) stored in checkpoint, applied at inference
 

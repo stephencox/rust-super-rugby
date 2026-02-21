@@ -845,15 +845,20 @@ def cmd_predict(args, config: Config):
         with torch.no_grad():
             logits = win_model(X_t, home_id_t, away_id_t)
             win_prob = torch.sigmoid(platt_a * logits + platt_b).item()
-            margin = margin_model.predict(X_t, home_id_t, away_id_t).item() * margin_scale
+            margin_quantiles = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_scale
+            margin_q10 = margin_quantiles[0].item()
+            margin = margin_quantiles[1].item()  # median
+            margin_q90 = margin_quantiles[2].item()
 
     winner = home_team.name if win_prob >= 0.5 else away_team.name
     prob = win_prob if win_prob >= 0.5 else 1 - win_prob
     margin_abs = abs(round(margin))
 
     print(f"\n  {home_team.name} vs {away_team.name}")
-    print(f"  → {winner} by {margin_abs} pts ({prob:.1%})")
+    print(f"  {chr(8594)} {winner} by {margin_abs} pts ({prob:.1%})")
     print(f"  Home win probability: {win_prob:.1%}")
+    if args.model != "lstm":
+        print(f"  Margin 80% CI: {margin_q10:.0f}-{margin_q90:.0f} pts")
 
 
 def cmd_predict_next(args, config: Config):
@@ -929,7 +934,7 @@ def cmd_predict_next(args, config: Config):
                     home_lengths=torch.tensor([home_len], dtype=torch.long),
                     away_lengths=torch.tensor([away_len], dtype=torch.long),
                 )
-            return preds["win_prob"].item(), preds["margin"].item()
+            return preds["win_prob"].item(), preds["margin"].item(), None, None
     else:
         if not output_json and not output_csv:
             print("Loading MLP models...")
@@ -960,8 +965,11 @@ def cmd_predict_next(args, config: Config):
             with torch.no_grad():
                 logits = win_model(X_t, home_id_t, away_id_t)
                 wp = torch.sigmoid(platt_a * logits + platt_b).item()
-                mg = margin_model.predict(X_t, home_id_t, away_id_t).item() * margin_scale
-            return wp, mg
+                mq = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_scale
+                mg = mq[1].item()  # median
+                mg_q10 = mq[0].item()
+                mg_q90 = mq[2].item()
+            return wp, mg, mg_q10, mg_q90
 
     # Find DB teams and predict
     def find_db_team(name):
@@ -993,8 +1001,8 @@ def cmd_predict_next(args, config: Config):
                 print(f"  Warning: Insufficient history for {home_team.name} vs {away_team.name}")
             continue
 
-        win_prob, margin = pred
-        results.append({
+        win_prob, margin, margin_q10, margin_q90 = pred
+        result = {
             "date": fixture.date.isoformat(),
             "round": fixture.round,
             "home": home_team.name,
@@ -1002,7 +1010,11 @@ def cmd_predict_next(args, config: Config):
             "venue": fixture.venue,
             "home_win_prob": win_prob,
             "margin": round(margin),
-        })
+        }
+        if margin_q10 is not None:
+            result["margin_q10"] = round(margin_q10)
+            result["margin_q90"] = round(margin_q90)
+        results.append(result)
 
     if not results:
         print("Could not make any predictions.")
@@ -1022,7 +1034,8 @@ def cmd_predict_next(args, config: Config):
             prob = r["home_win_prob"] if r["home_win_prob"] >= 0.5 else 1 - r["home_win_prob"]
             margin_abs = abs(r["margin"])
             print(f"  {r['date']}  {r['home']:>15} vs {r['away']:<15}")
-            print(f"           → {winner} by {margin_abs} pts ({prob:.1%})\n")
+            ci = f" (CI: {r['margin_q10']}-{r['margin_q90']})" if "margin_q10" in r else ""
+            print(f"           {chr(8594)} {winner} by {margin_abs} pts ({prob:.1%}){ci}\n")
 
 
 def cmd_model_info(args, config: Config):
@@ -1055,7 +1068,7 @@ def cmd_model_validate(args, config: Config):
             embed_info = f", {num_teams} teams, embed_dim={win_m.team_embed_dim}" if num_teams > 0 else ""
             platt_info = f", platt=({platt_a:.3f}, {platt_b:.3f})" if platt_a != 1.0 or platt_b != 0.0 else ""
             print(f"  MLP win model: OK ({input_dim} features{embed_info}{platt_info})")
-            print(f"  MLP margin model: OK ({input_dim} features{embed_info})")
+            print(f"  MLP margin model: OK ({input_dim} features{embed_info}, quantile=[.1,.5,.9])")
         except Exception as e:
             errors.append(f"MLP: {e}")
             print(f"  MLP models: FAILED ({e})")

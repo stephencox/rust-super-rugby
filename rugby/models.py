@@ -114,9 +114,12 @@ class MarginRegressor(nn.Module):
     """
     MLP regressor for predicting match margin (absolute points difference).
 
-    Takes the same features as WinClassifier — fully independent, no win_prob dependency.
-    Output is non-negative (ReLU on head).
+    Predicts three quantiles (10th, 50th, 90th percentile) to provide
+    a point estimate with confidence interval. Trained with pinball loss.
+    Output is non-negative (ReLU on heads).
     """
+
+    QUANTILES = (0.1, 0.5, 0.9)
 
     def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0,
                  use_batchnorm: bool = False, num_teams: int = 0, team_embed_dim: int = 8):
@@ -136,7 +139,8 @@ class MarginRegressor(nn.Module):
             prev_dim = h_dim
 
         self.backbone = nn.ModuleList(blocks)
-        self.head = nn.Linear(prev_dim, 1)
+        # Three heads: q10, q50, q90
+        self.head = nn.Linear(prev_dim, 3)
 
     def _embed_teams(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor],
                      away_team_id: Optional[torch.Tensor]) -> torch.Tensor:
@@ -162,16 +166,22 @@ class MarginRegressor(nn.Module):
             away_team_id: Optional away team IDs [batch]
 
         Returns:
-            Predicted margin [batch] (always non-negative)
+            Predicted quantiles [batch, 3] (q10, q50, q90), all non-negative.
+            Monotonicity enforced: q10 <= q50 <= q90.
         """
         h = self._embed_teams(x, home_team_id, away_team_id)
         for block in self.backbone:
             h = block(h)
-        return torch.relu(self.head(h)).squeeze(-1)
+        raw = self.head(h)  # [batch, 3]
+        # Enforce non-negative and monotonicity: q10 = relu(raw0), q50 = q10 + softplus(raw1), q90 = q50 + softplus(raw2)
+        q10 = torch.relu(raw[:, 0])
+        q50 = q10 + torch.nn.functional.softplus(raw[:, 1])
+        q90 = q50 + torch.nn.functional.softplus(raw[:, 2])
+        return torch.stack([q10, q50, q90], dim=1)
 
     def predict(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
                 away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Get margin predictions."""
+        """Get margin predictions [batch, 3] (q10, q50, q90)."""
         with torch.no_grad():
             return self.forward(x, home_team_id, away_team_id)
 

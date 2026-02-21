@@ -30,6 +30,24 @@ _SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
                (25, 26), (27, 28), (29, 30)]
 
 
+def quantile_loss(pred: torch.Tensor, target: torch.Tensor,
+                  quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9)) -> torch.Tensor:
+    """Pinball (quantile) loss for multiple quantiles.
+
+    Args:
+        pred: Predicted quantiles [batch, num_quantiles]
+        target: Actual values [batch]
+        quantiles: Quantile levels (must match pred columns)
+
+    Returns:
+        Scalar loss (mean across batch and quantiles)
+    """
+    errors = target.unsqueeze(1) - pred  # [batch, num_quantiles]
+    q = torch.tensor(quantiles, dtype=pred.dtype, device=pred.device)
+    losses = torch.max(q * errors, (q - 1) * errors)
+    return losses.mean()
+
+
 class MLPDataset(Dataset):
     """Dataset for MLP models with optional home/away augmentation."""
 
@@ -234,15 +252,16 @@ def train_margin_model(
     verbose: bool = True,
 ) -> Tuple[MarginRegressor, Dict]:
     """
-    Train margin regression model.
+    Train margin regression model with quantile loss.
 
+    Predicts 10th, 50th, and 90th percentiles using pinball loss.
     Normalizes margin targets by training-set mean internally.
     Returns margin_scale in history for denormalization at inference.
 
     Returns:
         Trained model and training history
     """
-    # Normalize margin targets so Huber loss is on a comparable scale
+    # Normalize margin targets so loss is on a comparable scale
     margin_scale = float(np.mean(y_margin_train)) if np.mean(y_margin_train) > 0 else 1.0
     y_margin_train_scaled = y_margin_train / margin_scale
     y_margin_val_scaled = y_margin_val / margin_scale if y_margin_val is not None else None
@@ -294,14 +313,16 @@ def train_margin_model(
                 margin_pred = model(X_batch, batch['home_team_id'], batch['away_team_id'])
             else:
                 margin_pred = model(X_batch)
-            loss = nn.functional.huber_loss(margin_pred, y_batch, delta=1.0)
+            # margin_pred is [batch, 3] (q10, q50, q90)
+            loss = quantile_loss(margin_pred, y_batch)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
 
             train_loss += loss.item() * len(X_batch)
-            train_margin_mae += (margin_pred - y_batch).abs().sum().item()
+            # MAE based on median (q50)
+            train_margin_mae += (margin_pred[:, 1] - y_batch).abs().sum().item()
             train_total += len(X_batch)
 
         train_loss /= train_total
@@ -314,8 +335,9 @@ def train_margin_model(
             model.train(False)
             with torch.no_grad():
                 val_margin_pred = model(X_val_t)
-                val_loss = nn.functional.huber_loss(val_margin_pred, y_val_t, delta=1.0).item()
-                val_margin_mae = (val_margin_pred - y_val_t).abs().mean().item() * margin_scale
+                val_loss = quantile_loss(val_margin_pred, y_val_t).item()
+                # MAE based on median (q50)
+                val_margin_mae = (val_margin_pred[:, 1] - y_val_t).abs().mean().item() * margin_scale
 
             history['val_loss'].append(val_loss)
             history['val_margin_mae'].append(val_margin_mae)
