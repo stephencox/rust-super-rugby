@@ -1,6 +1,6 @@
 """Hyperparameter search for rugby prediction models using Optuna."""
 
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import optuna
@@ -22,6 +22,9 @@ def tune_mlp(
     y_win_val: np.ndarray,
     X_test: np.ndarray,
     y_win_test: np.ndarray,
+    home_team_ids: Optional[np.ndarray] = None,
+    away_team_ids: Optional[np.ndarray] = None,
+    num_teams: int = 0,
     n_trials: int = 50,
 ) -> optuna.Study:
     """Bayesian hyperparameter search for MLP win classifier.
@@ -40,6 +43,10 @@ def tune_mlp(
             X_val, y_win_val,
             lr=lr, epochs=epochs, dropout=dropout,
             batch_size=batch_size, use_batchnorm=True,
+            augment_swap=True,
+            home_team_ids=home_team_ids,
+            away_team_ids=away_team_ids,
+            num_teams=num_teams,
             verbose=False,
         )
 

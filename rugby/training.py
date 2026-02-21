@@ -6,9 +6,66 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset, Dataset
+from torch.optim.lr_scheduler import OneCycleLR
 from typing import Tuple, Optional, Dict, List
 from .models import WinClassifier, MarginRegressor, SequenceLSTM
 from .features import SequenceDataSample
+
+
+# Feature indices for home/away augmentation (22-dim MatchFeatures)
+# Indices 0-3: differentials (negate)
+# Index 4: is_local (symmetric, keep)
+# Indices 5-9: home stats, 10-14: away stats (swap)
+# Indices 15-16: home_elo/away_elo (swap), 17: elo_diff (negate)
+# Indices 18-19: home form, 20-21: away form (swap)
+_NEGATE_INDICES = [0, 1, 2, 3, 17]
+_SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
+               (15, 16), (18, 20), (19, 21)]
+
+
+class MLPDataset(Dataset):
+    """Dataset for MLP models with optional home/away augmentation."""
+
+    def __init__(
+        self,
+        features: np.ndarray,
+        labels: np.ndarray,
+        home_team_ids: Optional[np.ndarray] = None,
+        away_team_ids: Optional[np.ndarray] = None,
+        augment: bool = False,
+    ):
+        self.features = torch.tensor(features, dtype=torch.float32)
+        self.labels = torch.tensor(labels, dtype=torch.float32)
+        self.home_team_ids = torch.tensor(home_team_ids, dtype=torch.long) if home_team_ids is not None else None
+        self.away_team_ids = torch.tensor(away_team_ids, dtype=torch.long) if away_team_ids is not None else None
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.features)
+
+    def __getitem__(self, idx):
+        x = self.features[idx].clone()
+        y = self.labels[idx].clone()
+        home_id = self.home_team_ids[idx] if self.home_team_ids is not None else None
+        away_id = self.away_team_ids[idx] if self.away_team_ids is not None else None
+
+        if self.augment and random.random() < 0.5:
+            # Negate differentials
+            for i in _NEGATE_INDICES:
+                x[i] = -x[i]
+            # Swap home/away stats
+            for h, a in _SWAP_PAIRS:
+                x[h], x[a] = x[a].clone(), x[h].clone()
+            # Flip win label (margin stays absolute)
+            y = 1.0 - y
+            # Swap team IDs
+            home_id, away_id = away_id, home_id
+
+        result = {'features': x, 'label': y}
+        if home_id is not None:
+            result['home_team_id'] = home_id
+            result['away_team_id'] = away_id
+        return result
 
 
 def train_win_model(
@@ -24,6 +81,11 @@ def train_win_model(
     weight_decay: float = 0.001,
     use_batchnorm: bool = False,
     early_stopping_patience: int = 0,
+    augment_swap: bool = False,
+    home_team_ids: Optional[np.ndarray] = None,
+    away_team_ids: Optional[np.ndarray] = None,
+    num_teams: int = 0,
+    team_embed_dim: int = 8,
     verbose: bool = True,
 ) -> Tuple[WinClassifier, Dict]:
     """
@@ -32,22 +94,21 @@ def train_win_model(
     Returns:
         Trained model and training history
     """
-    # Convert to tensors
-    X_train_t = torch.tensor(X_train, dtype=torch.float32)
-    y_train_t = torch.tensor(y_train, dtype=torch.float32)
-
     if X_val is not None:
         X_val_t = torch.tensor(X_val, dtype=torch.float32)
         y_val_t = torch.tensor(y_val, dtype=torch.float32)
 
     # Create data loader (drop_last avoids BatchNorm issues with batch_size=1)
-    train_dataset = TensorDataset(X_train_t, y_train_t)
+    train_dataset = MLPDataset(X_train, y_train, home_team_ids, away_team_ids, augment=augment_swap)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               drop_last=use_batchnorm)
 
     # Model and optimizer
-    model = WinClassifier(X_train.shape[1], hidden_dims, dropout, use_batchnorm=use_batchnorm)
+    model = WinClassifier(X_train.shape[1], hidden_dims, dropout, use_batchnorm=use_batchnorm,
+                          num_teams=num_teams, team_embed_dim=team_embed_dim)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    steps_per_epoch = (len(X_train) + batch_size - 1) // batch_size
+    scheduler = OneCycleLR(optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=steps_per_epoch)
     criterion = nn.BCEWithLogitsLoss()
 
     # Training history
@@ -62,6 +123,7 @@ def train_win_model(
     best_val_loss = float('inf')
     best_model_state = None
     stale_epochs = 0
+    use_team_ids = num_teams > 0 and home_team_ids is not None
 
     for epoch in range(epochs):
         # Training
@@ -70,13 +132,20 @@ def train_win_model(
         train_correct = 0
         train_total = 0
 
-        for X_batch, y_batch in train_loader:
+        for batch in train_loader:
+            X_batch = batch['features']
+            y_batch = batch['label']
+
             optimizer.zero_grad()
-            logits = model(X_batch)
+            if use_team_ids:
+                logits = model(X_batch, batch['home_team_id'], batch['away_team_id'])
+            else:
+                logits = model(X_batch)
             loss = criterion(logits, y_batch)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
 
             train_loss += loss.item() * len(X_batch)
             preds = (torch.sigmoid(logits) >= 0.5).float()
@@ -109,8 +178,9 @@ def train_win_model(
                 stale_epochs += 1
 
             if verbose and (epoch + 1) % 10 == 0:
+                current_lr = optimizer.param_groups[0]['lr']
                 print(f"Epoch {epoch+1:3d}: train_loss={train_loss:.4f}, train_acc={train_acc:.1%}, "
-                      f"val_loss={val_loss:.4f}, val_acc={val_acc:.1%}")
+                      f"val_loss={val_loss:.4f}, val_acc={val_acc:.1%}, lr={current_lr:.1e}")
 
             # Early stopping
             if early_stopping_patience > 0 and stale_epochs >= early_stopping_patience:
@@ -142,6 +212,11 @@ def train_margin_model(
     weight_decay: float = 0.001,
     use_batchnorm: bool = False,
     early_stopping_patience: int = 0,
+    augment_swap: bool = False,
+    home_team_ids: Optional[np.ndarray] = None,
+    away_team_ids: Optional[np.ndarray] = None,
+    num_teams: int = 0,
+    team_embed_dim: int = 8,
     verbose: bool = True,
 ) -> Tuple[MarginRegressor, Dict]:
     """
@@ -158,22 +233,22 @@ def train_margin_model(
     y_margin_train_scaled = y_margin_train / margin_scale
     y_margin_val_scaled = y_margin_val / margin_scale if y_margin_val is not None else None
 
-    # Convert to tensors
-    X_train_t = torch.tensor(X_train, dtype=torch.float32)
-    y_train_t = torch.tensor(y_margin_train_scaled, dtype=torch.float32)
-
     if X_val is not None:
         X_val_t = torch.tensor(X_val, dtype=torch.float32)
         y_val_t = torch.tensor(y_margin_val_scaled, dtype=torch.float32)
 
     # Create data loader (drop_last avoids BatchNorm issues with batch_size=1)
-    train_dataset = TensorDataset(X_train_t, y_train_t)
+    # Note: margin augmentation keeps labels unchanged (absolute margin is symmetric)
+    train_dataset = MLPDataset(X_train, y_margin_train_scaled, home_team_ids, away_team_ids, augment=augment_swap)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               drop_last=use_batchnorm)
 
     # Model and optimizer
-    model = MarginRegressor(X_train.shape[1], hidden_dims, dropout, use_batchnorm=use_batchnorm)
+    model = MarginRegressor(X_train.shape[1], hidden_dims, dropout, use_batchnorm=use_batchnorm,
+                            num_teams=num_teams, team_embed_dim=team_embed_dim)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    steps_per_epoch = (len(X_train) + batch_size - 1) // batch_size
+    scheduler = OneCycleLR(optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=steps_per_epoch)
 
     # Training history
     history = {
@@ -187,6 +262,7 @@ def train_margin_model(
     best_val_loss = float('inf')
     best_model_state = None
     stale_epochs = 0
+    use_team_ids = num_teams > 0 and home_team_ids is not None
 
     for epoch in range(epochs):
         # Training
@@ -195,13 +271,20 @@ def train_margin_model(
         train_margin_mae = 0
         train_total = 0
 
-        for X_batch, y_batch in train_loader:
+        for batch in train_loader:
+            X_batch = batch['features']
+            y_batch = batch['label']
+
             optimizer.zero_grad()
-            margin_pred = model(X_batch)
+            if use_team_ids:
+                margin_pred = model(X_batch, batch['home_team_id'], batch['away_team_id'])
+            else:
+                margin_pred = model(X_batch)
             loss = nn.functional.huber_loss(margin_pred, y_batch, delta=1.0)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
 
             train_loss += loss.item() * len(X_batch)
             train_margin_mae += (margin_pred - y_batch).abs().sum().item()
@@ -232,8 +315,9 @@ def train_margin_model(
                 stale_epochs += 1
 
             if verbose and (epoch + 1) % 10 == 0:
+                current_lr = optimizer.param_groups[0]['lr']
                 print(f"Epoch {epoch+1:3d}: train_loss={train_loss:.4f}, train_mae={train_margin_mae:.1f}, "
-                      f"val_loss={val_loss:.4f}, val_mae={val_margin_mae:.1f}")
+                      f"val_loss={val_loss:.4f}, val_mae={val_margin_mae:.1f}, lr={current_lr:.1e}")
 
             # Early stopping
             if early_stopping_patience > 0 and stale_epochs >= early_stopping_patience:

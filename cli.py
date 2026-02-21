@@ -358,7 +358,12 @@ def cmd_train(args, config: Config):
         train_cutoff = datetime(2023, 1, 1)
 
     X_train_list, y_win_train_list, y_margin_train_list = [], [], []
+    home_id_train_list, away_id_train_list = [], []
     X_val_list, y_win_val_list, y_margin_val_list = [], [], []
+
+    # Build team_id -> embedding index mapping (1-based, 0 reserved for unknown)
+    team_to_idx = {tid: i + 1 for i, tid in enumerate(sorted(teams.keys()))}
+    num_teams = len(teams)
 
     for match in sorted(matches, key=lambda m: m.date):
         features = builder.build_features(match)
@@ -370,6 +375,8 @@ def cmd_train(args, config: Config):
             X_train_list.append(features.to_array())
             y_win_train_list.append(1.0 if match.home_win else 0.0)
             y_margin_train_list.append(float(margin))
+            home_id_train_list.append(team_to_idx.get(match.home_team_id, 0))
+            away_id_train_list.append(team_to_idx.get(match.away_team_id, 0))
         else:
             X_val_list.append(features.to_array())
             y_win_val_list.append(1.0 if match.home_win else 0.0)
@@ -378,6 +385,8 @@ def cmd_train(args, config: Config):
     X_train = np.array(X_train_list)
     y_win_train = np.array(y_win_train_list)
     y_margin_train = np.array(y_margin_train_list)
+    home_team_ids = np.array(home_id_train_list, dtype=np.int64)
+    away_team_ids = np.array(away_id_train_list, dtype=np.int64)
 
     print(f"  Training set: {len(X_train)} samples")
 
@@ -402,6 +411,10 @@ def cmd_train(args, config: Config):
         weight_decay=config.training.weight_decay,
         use_batchnorm=True,
         early_stopping_patience=config.training.early_stopping_patience,
+        augment_swap=True,
+        home_team_ids=home_team_ids,
+        away_team_ids=away_team_ids,
+        num_teams=num_teams,
     )
 
     print(f"\n[4/5] Training win classifier for {epochs} epochs, lr={lr}...")
@@ -431,8 +444,14 @@ def cmd_train(args, config: Config):
     prefix.parent.mkdir(parents=True, exist_ok=True)
     win_model.save(f"{prefix}_win.pt")
     margin_model.save(f"{prefix}_margin.pt")
+
+    # Save normalizer + team embedding metadata for inference restoration
+    team_to_idx_keys = np.array(sorted(teams.keys()), dtype=np.int64)
     np.savez(f"{prefix}_mlp_norm.npz", mean=normalizer.mean, std=normalizer.std,
-             margin_scale=np.array([margin_scale]))
+             margin_scale=np.array([margin_scale]),
+             num_teams=np.array([num_teams]),
+             team_embed_dim=np.array([win_model.team_embed_dim]),
+             team_to_idx_keys=team_to_idx_keys)
     print(f"\nModels saved to {prefix}_win.pt, {prefix}_margin.pt")
 
 
@@ -534,7 +553,11 @@ def cmd_tune_mlp(args, config: Config):
     train_cutoff = datetime(2023, 1, 1)
     val_cutoff = datetime(2024, 1, 1)
 
+    team_to_idx = {tid: i + 1 for i, tid in enumerate(sorted(teams.keys()))}
+    num_teams = len(teams)
+
     X_train_l, y_w_train_l = [], []
+    home_id_train_l, away_id_train_l = [], []
     X_val_l, y_w_val_l = [], []
     X_test_l, y_w_test_l = [], []
 
@@ -547,6 +570,8 @@ def cmd_tune_mlp(args, config: Config):
         arr = features.to_array()
         if match.date < train_cutoff:
             X_train_l.append(arr); y_w_train_l.append(win)
+            home_id_train_l.append(team_to_idx.get(match.home_team_id, 0))
+            away_id_train_l.append(team_to_idx.get(match.away_team_id, 0))
         elif match.date < val_cutoff:
             X_val_l.append(arr); y_w_val_l.append(win)
         else:
@@ -556,6 +581,8 @@ def cmd_tune_mlp(args, config: Config):
     X_train = normalizer.fit_transform(np.array(X_train_l))
     X_val = normalizer.transform(np.array(X_val_l))
     X_test = normalizer.transform(np.array(X_test_l))
+    home_team_ids = np.array(home_id_train_l, dtype=np.int64)
+    away_team_ids = np.array(away_id_train_l, dtype=np.int64)
 
     n_trials = args.n_trials
     print(f"Running {n_trials} Optuna trials...\n")
@@ -564,6 +591,9 @@ def cmd_tune_mlp(args, config: Config):
         X_train, np.array(y_w_train_l),
         X_val, np.array(y_w_val_l),
         X_test, np.array(y_w_test_l),
+        home_team_ids=home_team_ids,
+        away_team_ids=away_team_ids,
+        num_teams=num_teams,
         n_trials=n_trials,
     )
 
@@ -702,13 +732,23 @@ def cmd_predict(args, config: Config):
         normalizer.mean = norm_data["mean"]
         normalizer.std = norm_data["std"]
         margin_scale = float(norm_data["margin_scale"][0]) if "margin_scale" in norm_data else 1.0
+        num_teams = int(norm_data["num_teams"][0]) if "num_teams" in norm_data else 0
+        team_embed_dim = int(norm_data["team_embed_dim"][0]) if "team_embed_dim" in norm_data else 8
+
+        # Reconstruct team_to_idx mapping
+        team_to_idx = {}
+        if "team_to_idx_keys" in norm_data:
+            for i, tid in enumerate(norm_data["team_to_idx_keys"]):
+                team_to_idx[int(tid)] = i + 1
 
         input_dim = len(normalizer.mean)
-        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
+                                  use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
         win_model.load(f"{prefix}_win.pt")
         win_model.train(False)
 
-        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
+                                       use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
         margin_model.load(f"{prefix}_margin.pt")
         margin_model.train(False)
 
@@ -729,9 +769,12 @@ def cmd_predict(args, config: Config):
         X_norm = normalizer.transform(X)
         X_t = torch.tensor(X_norm, dtype=torch.float32)
 
+        home_id_t = torch.tensor([team_to_idx.get(home_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
+        away_id_t = torch.tensor([team_to_idx.get(away_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
+
         with torch.no_grad():
-            win_prob = win_model.predict_proba(X_t).item()
-            margin = margin_model.predict(X_t).item() * margin_scale
+            win_prob = win_model.predict_proba(X_t, home_id_t, away_id_t).item()
+            margin = margin_model.predict(X_t, home_id_t, away_id_t).item() * margin_scale
 
     winner = home_team.name if win_prob >= 0.5 else away_team.name
     prob = win_prob if win_prob >= 0.5 else 1 - win_prob
@@ -835,13 +878,22 @@ def cmd_predict_next(args, config: Config):
         normalizer.mean = norm_data["mean"]
         normalizer.std = norm_data["std"]
         margin_scale = float(norm_data["margin_scale"][0]) if "margin_scale" in norm_data else 1.0
+        num_teams = int(norm_data["num_teams"][0]) if "num_teams" in norm_data else 0
+        team_embed_dim = int(norm_data["team_embed_dim"][0]) if "team_embed_dim" in norm_data else 8
+
+        team_to_idx = {}
+        if "team_to_idx_keys" in norm_data:
+            for i, tid in enumerate(norm_data["team_to_idx_keys"]):
+                team_to_idx[int(tid)] = i + 1
 
         input_dim = len(normalizer.mean)
-        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        win_model = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
+                                  use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
         win_model.load(f"{prefix}_win.pt")
         win_model.train(False)
 
-        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+        margin_model = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
+                                       use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
         margin_model.load(f"{prefix}_margin.pt")
         margin_model.train(False)
 
@@ -859,9 +911,11 @@ def cmd_predict_next(args, config: Config):
             X = features.to_array().reshape(1, -1)
             X_norm = normalizer.transform(X)
             X_t = torch.tensor(X_norm, dtype=torch.float32)
+            home_id_t = torch.tensor([team_to_idx.get(home_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
+            away_id_t = torch.tensor([team_to_idx.get(away_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
             with torch.no_grad():
-                wp = win_model.predict_proba(X_t).item()
-                mg = margin_model.predict(X_t).item() * margin_scale
+                wp = win_model.predict_proba(X_t, home_id_t, away_id_t).item()
+                mg = margin_model.predict(X_t, home_id_t, away_id_t).item() * margin_scale
             return wp, mg
 
     # Find DB teams and predict
@@ -957,12 +1011,17 @@ def cmd_model_validate(args, config: Config):
             normalizer.mean = norm_data["mean"]
             normalizer.std = norm_data["std"]
             input_dim = len(normalizer.mean)
-            win_m = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+            num_teams = int(norm_data["num_teams"][0]) if "num_teams" in norm_data else 0
+            team_embed_dim = int(norm_data["team_embed_dim"][0]) if "team_embed_dim" in norm_data else 8
+            win_m = WinClassifier(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
+                                  use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
             win_m.load(win_path)
-            margin_m = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout, use_batchnorm=True)
+            margin_m = MarginRegressor(input_dim, hidden_dims=config.model.hidden_dims, dropout=config.training.dropout,
+                                       use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
             margin_m.load(margin_path)
-            print(f"  MLP win model: OK ({input_dim} features)")
-            print(f"  MLP margin model: OK ({input_dim} features)")
+            embed_info = f", {num_teams} teams, embed_dim={team_embed_dim}" if num_teams > 0 else ""
+            print(f"  MLP win model: OK ({input_dim} features{embed_info})")
+            print(f"  MLP margin model: OK ({input_dim} features{embed_info})")
         except Exception as e:
             errors.append(f"MLP: {e}")
             print(f"  MLP models: FAILED ({e})")

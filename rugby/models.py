@@ -15,11 +15,18 @@ class WinClassifier(nn.Module):
     """
 
     def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0,
-                 use_batchnorm: bool = False):
+                 use_batchnorm: bool = False, num_teams: int = 0, team_embed_dim: int = 8):
         super().__init__()
+        self.num_teams = num_teams
+        self.team_embed_dim = team_embed_dim
+
+        first_dim = input_dim
+        if num_teams > 0:
+            self.team_embedding = nn.Embedding(num_teams + 1, team_embed_dim, padding_idx=0)
+            first_dim += 2 * team_embed_dim
 
         layers = []
-        prev_dim = input_dim
+        prev_dim = first_dim
         for h_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, h_dim))
             if use_batchnorm:
@@ -32,28 +39,44 @@ class WinClassifier(nn.Module):
         self.backbone = nn.Sequential(*layers)
         self.head = nn.Linear(prev_dim, 1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
+                away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass.
 
         Args:
             x: Input features [batch, input_dim]
+            home_team_id: Optional home team IDs [batch]
+            away_team_id: Optional away team IDs [batch]
 
         Returns:
             Win logits [batch] (apply sigmoid for probability)
         """
+        if self.num_teams > 0:
+            if home_team_id is not None and away_team_id is not None:
+                home_emb = self.team_embedding(home_team_id)
+                away_emb = self.team_embedding(away_team_id)
+            else:
+                # Use padding (zeros) when no team IDs provided
+                zeros = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+                home_emb = self.team_embedding(zeros)
+                away_emb = self.team_embedding(zeros)
+            x = torch.cat([x, home_emb, away_emb], dim=1)
         h = self.backbone(x)
         return self.head(h).squeeze(-1)
 
-    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+    def predict_proba(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
+                      away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Get win probability."""
         with torch.no_grad():
-            logits = self.forward(x)
+            logits = self.forward(x, home_team_id, away_team_id)
             return torch.sigmoid(logits)
 
-    def predict(self, x: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    def predict(self, x: torch.Tensor, threshold: float = 0.5,
+                home_team_id: Optional[torch.Tensor] = None,
+                away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Get binary predictions."""
-        proba = self.predict_proba(x)
+        proba = self.predict_proba(x, home_team_id, away_team_id)
         return (proba >= threshold).float()
 
     def save(self, path: Path):
@@ -74,11 +97,18 @@ class MarginRegressor(nn.Module):
     """
 
     def __init__(self, input_dim: int, hidden_dims: List[int] = [64], dropout: float = 0.0,
-                 use_batchnorm: bool = False):
+                 use_batchnorm: bool = False, num_teams: int = 0, team_embed_dim: int = 8):
         super().__init__()
+        self.num_teams = num_teams
+        self.team_embed_dim = team_embed_dim
+
+        first_dim = input_dim
+        if num_teams > 0:
+            self.team_embedding = nn.Embedding(num_teams + 1, team_embed_dim, padding_idx=0)
+            first_dim += 2 * team_embed_dim
 
         layers = []
-        prev_dim = input_dim
+        prev_dim = first_dim
         for h_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, h_dim))
             if use_batchnorm:
@@ -91,23 +121,36 @@ class MarginRegressor(nn.Module):
         self.backbone = nn.Sequential(*layers)
         self.head = nn.Linear(prev_dim, 1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
+                away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass.
 
         Args:
             x: Input features [batch, input_dim]
+            home_team_id: Optional home team IDs [batch]
+            away_team_id: Optional away team IDs [batch]
 
         Returns:
             Predicted margin [batch] (always non-negative)
         """
+        if self.num_teams > 0:
+            if home_team_id is not None and away_team_id is not None:
+                home_emb = self.team_embedding(home_team_id)
+                away_emb = self.team_embedding(away_team_id)
+            else:
+                zeros = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+                home_emb = self.team_embedding(zeros)
+                away_emb = self.team_embedding(zeros)
+            x = torch.cat([x, home_emb, away_emb], dim=1)
         h = self.backbone(x)
         return torch.relu(self.head(h)).squeeze(-1)
 
-    def predict(self, x: torch.Tensor) -> torch.Tensor:
+    def predict(self, x: torch.Tensor, home_team_id: Optional[torch.Tensor] = None,
+                away_team_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Get margin predictions."""
         with torch.no_grad():
-            return self.forward(x)
+            return self.forward(x, home_team_id, away_team_id)
 
     def save(self, path: Path):
         """Save model weights."""
