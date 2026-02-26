@@ -445,7 +445,8 @@ def cmd_train(args, config: Config):
         log_dir=log_dir,
         **train_kwargs,
     )
-    margin_scale = margin_history.get('margin_scale', 1.0)
+    margin_mean = margin_history.get('margin_offset', 0.0)
+    margin_std = margin_history.get('margin_scale', 1.0)
 
     if X_val_norm is not None:
         print(f"\n  Best validation MAE: {margin_history['best_val_mae']:.1f} points")
@@ -465,7 +466,9 @@ def cmd_train(args, config: Config):
         'margin_model_state': margin_model.state_dict(),
         'normalizer_mean': normalizer.mean,
         'normalizer_std': normalizer.std,
-        'margin_scale': margin_scale,
+        'margin_mean': margin_mean,
+        'margin_std': margin_std,
+        'margin_scale': margin_std,  # backward compat
         'num_teams': num_teams,
         'team_embed_dim': win_model.team_embed_dim,
         'team_to_idx_keys': sorted(teams.keys()),
@@ -707,7 +710,7 @@ def cmd_tune_lstm(args, config: Config):
 def load_mlp_checkpoint(prefix: Path, config: Config):
     """Load MLP models, normalizer, and metadata from unified checkpoint.
 
-    Returns (win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b).
+    Returns (win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b).
     """
     mlp_path = Path(f"{prefix}_mlp.pt")
     ckpt = torch.load(mlp_path, weights_only=False)
@@ -715,7 +718,8 @@ def load_mlp_checkpoint(prefix: Path, config: Config):
     normalizer = FeatureNormalizer()
     normalizer.mean = ckpt['normalizer_mean']
     normalizer.std = ckpt['normalizer_std']
-    margin_scale = ckpt.get('margin_scale', 1.0)
+    margin_std = ckpt.get('margin_std', ckpt.get('margin_scale', 1.0))
+    margin_mean = ckpt.get('margin_mean', 0.0)
     num_teams = ckpt.get('num_teams', 0)
     team_embed_dim = ckpt.get('team_embed_dim', 8)
     hidden_dims = ckpt.get('hidden_dims', config.model.hidden_dims)
@@ -738,7 +742,7 @@ def load_mlp_checkpoint(prefix: Path, config: Config):
     margin_model.load_state_dict(ckpt['margin_model_state'])
     margin_model.train(False)
 
-    return win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b
+    return win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b
 
 
 def load_lstm_checkpoint(prefix: Path, config: Config):
@@ -823,7 +827,7 @@ def cmd_predict(args, config: Config):
         win_prob = preds["win_prob"].item()
         margin = preds["margin"].item()
     else:
-        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b = \
+        win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
             load_mlp_checkpoint(prefix, config)
 
         builder = FeatureBuilder(matches, teams)
@@ -854,7 +858,7 @@ def cmd_predict(args, config: Config):
         with torch.no_grad():
             logits = win_model(X_t, home_id_t, away_id_t)
             win_prob = torch.sigmoid(platt_a * logits + platt_b).item()
-            margin_quantiles = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_scale
+            margin_quantiles = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_std + margin_mean
             margin_q10 = margin_quantiles[0].item()
             margin = margin_quantiles[1].item()  # median
             margin_q90 = margin_quantiles[2].item()
@@ -947,7 +951,7 @@ def cmd_predict_next(args, config: Config):
     else:
         if not output_json and not output_csv:
             print("Loading MLP models...")
-        win_model, margin_model, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b = \
+        win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
             load_mlp_checkpoint(prefix, config)
 
         builder = FeatureBuilder(matches, teams)
@@ -974,7 +978,7 @@ def cmd_predict_next(args, config: Config):
             with torch.no_grad():
                 logits = win_model(X_t, home_id_t, away_id_t)
                 wp = torch.sigmoid(platt_a * logits + platt_b).item()
-                mq = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_scale
+                mq = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_std + margin_mean
                 mg = mq[1].item()  # median
                 mg_q10 = mq[0].item()
                 mg_q90 = mq[2].item()
@@ -1071,7 +1075,7 @@ def cmd_model_validate(args, config: Config):
     mlp_path = Path(f"{prefix}_mlp.pt")
     if mlp_path.exists():
         try:
-            win_m, margin_m, normalizer, margin_scale, team_to_idx, num_teams, platt_a, platt_b = \
+            win_m, margin_m, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
                 load_mlp_checkpoint(prefix, config)
             input_dim = len(normalizer.mean)
             embed_info = f", {num_teams} teams, embed_dim={win_m.team_embed_dim}" if num_teams > 0 else ""

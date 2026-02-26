@@ -177,15 +177,16 @@ class MarginRegressor(nn.Module):
             away_team_id: Optional away team IDs [batch]
 
         Returns:
-            Predicted quantiles [batch, 3] (q10, q50, q90), all non-negative.
+            Predicted quantiles [batch, 3] (q10, q50, q90) in normalized space.
             Monotonicity enforced: q10 <= q50 <= q90.
         """
         h = self._embed_teams(x, home_team_id, away_team_id)
         for block in self.backbone:
             h = block(h)
         raw = self.head(h)  # [batch, 3]
-        # Enforce non-negative and monotonicity: q10 = relu(raw0), q50 = q10 + softplus(raw1), q90 = q50 + softplus(raw2)
-        q10 = torch.relu(raw[:, 0])
+        # Enforce monotonicity: q10 = raw0, q50 = q10 + softplus(raw1), q90 = q50 + softplus(raw2)
+        # No relu on q10 — targets are z-score normalized and can be negative
+        q10 = raw[:, 0]
         q50 = q10 + torch.nn.functional.softplus(raw[:, 1])
         q90 = q50 + torch.nn.functional.softplus(raw[:, 2])
         return torch.stack([q10, q50, q90], dim=1)

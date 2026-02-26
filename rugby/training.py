@@ -60,12 +60,14 @@ class MLPDataset(Dataset):
         home_team_ids: Optional[np.ndarray] = None,
         away_team_ids: Optional[np.ndarray] = None,
         augment: bool = False,
+        flip_label: bool = True,
     ):
         self.features = torch.tensor(features, dtype=torch.float32)
         self.labels = torch.tensor(labels, dtype=torch.float32)
         self.home_team_ids = torch.tensor(home_team_ids, dtype=torch.long) if home_team_ids is not None else None
         self.away_team_ids = torch.tensor(away_team_ids, dtype=torch.long) if away_team_ids is not None else None
         self.augment = augment
+        self.flip_label = flip_label
 
     def __len__(self):
         return len(self.features)
@@ -89,8 +91,9 @@ class MLPDataset(Dataset):
             # Reset home-only features to neutral
             for i, val in _RESET_INDICES.items():
                 x[i] = val
-            # Flip win label (margin stays absolute)
-            y = 1.0 - y
+            # Flip win label (0↔1), but keep margin unchanged (absolute)
+            if self.flip_label:
+                y = 1.0 - y
             # Swap team IDs
             home_id, away_id = away_id, home_id
 
@@ -279,8 +282,8 @@ def train_margin_model(
     Train margin regression model with quantile loss.
 
     Predicts 10th, 50th, and 90th percentiles using pinball loss.
-    Normalizes margin targets by training-set mean internally.
-    Returns margin_scale in history for denormalization at inference.
+    Z-score normalizes margin targets internally (consistent with feature normalization).
+    Returns margin_mean and margin_std in history for denormalization at inference.
 
     Returns:
         Trained model and training history
@@ -290,18 +293,22 @@ def train_margin_model(
         from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(log_dir=f"{log_dir}/margin")
 
-    # Normalize margin targets so loss is on a comparable scale
-    margin_scale = float(np.mean(y_margin_train)) if np.mean(y_margin_train) > 0 else 1.0
-    y_margin_train_scaled = y_margin_train / margin_scale
-    y_margin_val_scaled = y_margin_val / margin_scale if y_margin_val is not None else None
+    # Z-score normalize margin targets (consistent with feature normalization)
+    margin_mean = float(np.mean(y_margin_train))
+    margin_std = float(np.std(y_margin_train))
+    if margin_std < 0.001:
+        margin_std = 1.0
+    y_margin_train_scaled = (y_margin_train - margin_mean) / margin_std
+    y_margin_val_scaled = (y_margin_val - margin_mean) / margin_std if y_margin_val is not None else None
 
     if X_val is not None:
         X_val_t = torch.tensor(X_val, dtype=torch.float32)
         y_val_t = torch.tensor(y_margin_val_scaled, dtype=torch.float32)
 
     # Create data loader (drop_last avoids BatchNorm issues with batch_size=1)
-    # Note: margin augmentation keeps labels unchanged (absolute margin is symmetric)
-    train_dataset = MLPDataset(X_train, y_margin_train_scaled, home_team_ids, away_team_ids, augment=augment_swap)
+    # Absolute margin is symmetric — don't flip label on home/away swap
+    train_dataset = MLPDataset(X_train, y_margin_train_scaled, home_team_ids, away_team_ids,
+                               augment=augment_swap, flip_label=False)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               drop_last=use_batchnorm)
 
@@ -355,7 +362,7 @@ def train_margin_model(
             train_total += len(X_batch)
 
         train_loss /= train_total
-        train_margin_mae = train_margin_mae / train_total * margin_scale  # report in real points
+        train_margin_mae = train_margin_mae / train_total * margin_std  # report in real points
         history['train_loss'].append(train_loss)
         history['train_margin_mae'].append(train_margin_mae)
 
@@ -371,7 +378,7 @@ def train_margin_model(
                 val_margin_pred = model(X_val_t)
                 val_loss = quantile_loss(val_margin_pred, y_val_t).item()
                 # MAE based on median (q50)
-                val_margin_mae = (val_margin_pred[:, 1] - y_val_t).abs().mean().item() * margin_scale
+                val_margin_mae = (val_margin_pred[:, 1] - y_val_t).abs().mean().item() * margin_std
 
             history['val_loss'].append(val_loss)
             history['val_margin_mae'].append(val_margin_mae)
@@ -410,7 +417,11 @@ def train_margin_model(
         writer.close()
 
     history['best_val_mae'] = best_val_mae
-    history['margin_scale'] = margin_scale
+    history['margin_mean'] = margin_mean
+    history['margin_std'] = margin_std
+    # Backward compat: margin_scale used at inference to denormalize
+    history['margin_scale'] = margin_std
+    history['margin_offset'] = margin_mean
     return model, history
 
 
