@@ -959,13 +959,13 @@ def cmd_predict_next(args, config: Config):
             builder.build_features(match)
             builder.process_match(match)
 
-        def predict_fn(home_team, away_team):
+        def predict_fn(home_team, away_team, venue=None):
             now = datetime.now()
             synthetic = Match(
                 id=-1, date=now,
                 home_team_id=home_team.id, away_team_id=away_team.id,
                 home_score=0, away_score=0,
-                venue=None, round=None,
+                venue=venue, round=None,
             )
             features = builder.build_features(synthetic)
             if features is None:
@@ -1008,7 +1008,7 @@ def cmd_predict_next(args, config: Config):
                 print(f"  Warning: Unknown team '{fixture.away_team.name}'")
             continue
 
-        pred = predict_fn(home_team, away_team)
+        pred = predict_fn(home_team, away_team, venue=fixture.venue)
         if pred is None:
             if not output_json:
                 print(f"  Warning: Insufficient history for {home_team.name} vs {away_team.name}")
