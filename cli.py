@@ -871,7 +871,10 @@ def cmd_predict(args, config: Config):
     print(f"  {chr(8594)} {winner} by {margin_abs} pts ({prob:.1%})")
     print(f"  Home win probability: {win_prob:.1%}")
     if args.model != "lstm":
-        print(f"  Margin 80% CI: {margin_q10:.0f}-{margin_q90:.0f} pts")
+        ci_lo = abs(round(margin_q10))
+        ci_hi = abs(round(margin_q90))
+        ci_min, ci_max = sorted([ci_lo, ci_hi])
+        print(f"  Margin 80% CI: {ci_min}-{ci_max} pts")
 
 
 def cmd_predict_next(args, config: Config):
@@ -1047,7 +1050,13 @@ def cmd_predict_next(args, config: Config):
             prob = r["home_win_prob"] if r["home_win_prob"] >= 0.5 else 1 - r["home_win_prob"]
             margin_abs = abs(r["margin"])
             print(f"  {r['date']}  {r['home']:>15} vs {r['away']:<15}")
-            ci = f" (CI: {r['margin_q10']}-{r['margin_q90']})" if "margin_q10" in r else ""
+            if "margin_q10" in r:
+                ci_lo = abs(round(r['margin_q10']))
+                ci_hi = abs(round(r['margin_q90']))
+                ci_min, ci_max = sorted([ci_lo, ci_hi])
+                ci = f" (CI: {ci_min}-{ci_max})"
+            else:
+                ci = ""
             print(f"           {chr(8594)} {winner} by {margin_abs} pts ({prob:.1%}){ci}\n")
 
 
