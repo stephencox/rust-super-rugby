@@ -12,7 +12,7 @@ from .models import WinClassifier, MarginRegressor, SequenceLSTM
 from .features import SequenceDataSample
 
 
-# Feature indices for home/away augmentation (32-dim MatchFeatures)
+# Feature indices for home/away augmentation (34-dim MatchFeatures)
 # Indices 0-3: differentials (negate)
 # Index 4: is_local (symmetric, keep)
 # Indices 5-9: home stats, 10-14: away stats (swap)
@@ -23,13 +23,15 @@ from .features import SequenceDataSample
 # Indices 25-26: home/away consistency (swap)
 # Indices 27-28: home/away is_after_bye (swap)
 # Indices 29-30: home/away sos (swap)
-# Index 31: home_venue_win_rate (reset to 0.5 on swap)
+# Index 31: home_venue_margin_avg (reset to 0.0 on swap)
+# Indices 32-33: home/away country_win_rate (swap)
 _NEGATE_INDICES = [0, 1, 2, 3, 17, 23]
 _FLIP_INDICES = [22]  # x -> 1 - x
 _SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
                (15, 16), (18, 20), (19, 21),
-               (25, 26), (27, 28), (29, 30)]
-_RESET_INDICES = {31: 0.5}  # Reset to neutral on swap
+               (25, 26), (27, 28), (29, 30),
+               (32, 33)]
+_RESET_INDICES = {31: 0.0}  # Reset to neutral on swap
 
 
 def quantile_loss(pred: torch.Tensor, target: torch.Tensor,
@@ -61,6 +63,7 @@ class MLPDataset(Dataset):
         away_team_ids: Optional[np.ndarray] = None,
         augment: bool = False,
         flip_label: bool = True,
+        negate_label: bool = False,
     ):
         self.features = torch.tensor(features, dtype=torch.float32)
         self.labels = torch.tensor(labels, dtype=torch.float32)
@@ -68,6 +71,7 @@ class MLPDataset(Dataset):
         self.away_team_ids = torch.tensor(away_team_ids, dtype=torch.long) if away_team_ids is not None else None
         self.augment = augment
         self.flip_label = flip_label
+        self.negate_label = negate_label
 
     def __len__(self):
         return len(self.features)
@@ -91,9 +95,11 @@ class MLPDataset(Dataset):
             # Reset home-only features to neutral
             for i, val in _RESET_INDICES.items():
                 x[i] = val
-            # Flip win label (0↔1), but keep margin unchanged (absolute)
+            # Flip win label (0↔1) or negate signed margin
             if self.flip_label:
                 y = 1.0 - y
+            elif self.negate_label:
+                y = -y
             # Swap team IDs
             home_id, away_id = away_id, home_id
 
