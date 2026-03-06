@@ -123,7 +123,7 @@ class WinClassifier(nn.Module):
 
 class MarginRegressor(nn.Module):
     """
-    MLP regressor for predicting match margin (absolute points difference).
+    MLP regressor for predicting match margin (signed: home_score - away_score).
 
     Predicts three quantiles (10th, 50th, 90th percentile) to provide
     a point estimate with confidence interval. Trained with pinball loss.
@@ -362,7 +362,7 @@ class SequenceLSTM(nn.Module):
         # Margin prediction (using win_prob)
         margin_input = torch.cat([combined, win_prob], dim=1)
         margin_h = self.dropout(torch.relu(self.margin_fc(margin_input)))
-        margin = torch.relu(self.margin_head(margin_h))
+        margin = self.margin_head(margin_h)
 
         return win_logit, margin
 

@@ -312,9 +312,9 @@ def train_margin_model(
         y_val_t = torch.tensor(y_margin_val_scaled, dtype=torch.float32)
 
     # Create data loader (drop_last avoids BatchNorm issues with batch_size=1)
-    # Absolute margin is symmetric — don't flip label on home/away swap
+    # Signed margin: negate when swapping home/away
     train_dataset = MLPDataset(X_train, y_margin_train_scaled, home_team_ids, away_team_ids,
-                               augment=augment_swap, flip_label=False)
+                               augment=augment_swap, flip_label=False, negate_label=True)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               drop_last=use_batchnorm)
 
@@ -523,7 +523,7 @@ class SequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        margin = abs(s.home_score - s.away_score)
+        margin = s.home_score - s.away_score
         home_win = 1.0 if s.home_win else 0.0
 
         if self.augment and random.random() < 0.5:
@@ -533,7 +533,7 @@ class SequenceDataset(Dataset):
                 'away_history': torch.tensor(s.home_history, dtype=torch.float32),
                 'comparison': torch.tensor(-s.comparison, dtype=torch.float32),
                 'home_win': torch.tensor(1.0 - home_win, dtype=torch.float32),
-                'margin': torch.tensor(margin, dtype=torch.float32),
+                'margin': torch.tensor(-margin, dtype=torch.float32),
                 'home_length': torch.tensor(_seq_length(s.away_history), dtype=torch.long),
                 'away_length': torch.tensor(_seq_length(s.home_history), dtype=torch.long),
             }

@@ -375,7 +375,7 @@ def cmd_train(args, config: Config):
         builder.process_match(match)
         if features is None:
             continue
-        margin = abs(match.home_score - match.away_score)
+        margin = match.home_score - match.away_score
         if match.date < train_cutoff:
             X_train_list.append(features.to_array())
             y_win_train_list.append(1.0 if match.home_win else 0.0)
