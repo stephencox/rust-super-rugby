@@ -1,7 +1,7 @@
 [super-rugby.training]
 epochs = 296
 batch_size = 32
-learning_rate = 0.056
+learning_rate = 0.005
 weight_decay = 0.001
 dropout = 0.41
 early_stopping_patience = 30
