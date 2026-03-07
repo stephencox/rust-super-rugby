@@ -4,11 +4,13 @@ import pytest
 import numpy as np
 import torch
 from rugby.training import (
-    MLPDataset, train_win_model, train_margin_model,
+    MLPDataset, SequenceDataset, _seq_length,
+    train_win_model, train_margin_model,
     _NEGATE_INDICES, _FLIP_INDICES, _SWAP_PAIRS, _RESET_INDICES,
+    _COMP_NEGATE_INDICES, _COMP_FLIP_INDICES, _COMP_SWAP_PAIRS,
 )
 from rugby.models import WinClassifier, MarginRegressor
-from rugby.features import MatchFeatures
+from rugby.features import MatchFeatures, SequenceDataSample, SequenceNormalizer
 
 
 INPUT_DIM = MatchFeatures.num_features()
@@ -154,3 +156,136 @@ class TestTrainMarginModel:
         y = np.random.randn(50).astype(np.float32) * 10 + 15
         _, history = train_margin_model(X, y, epochs=3, verbose=False)
         assert history['margin_scale'] == pytest.approx(float(np.std(y)), rel=1e-3)
+
+
+COMP_DIM = 50
+
+
+class TestSequenceNormalizerPadding:
+    def test_zero_padding_preserved(self):
+        """Zero-padded rows must remain zero after normalization."""
+        seq_len, feat_dim = 10, 23
+        # 6 real timesteps, 4 zero-padded
+        seq = np.random.randn(seq_len, feat_dim).astype(np.float32)
+        seq[6:] = 0.0
+
+        sample = SequenceDataSample(
+            home_history=seq.copy(),
+            away_history=seq.copy(),
+            comparison=np.random.randn(COMP_DIM).astype(np.float32),
+            home_team_id=0, away_team_id=1,
+            home_win=True, home_score=25.0, away_score=20.0,
+        )
+
+        norm = SequenceNormalizer()
+        norm.fit([sample])
+        transformed = norm.transform_sample(sample)
+
+        # Padding rows should still be all zeros
+        assert np.all(transformed.home_history[6:] == 0.0)
+        assert np.all(transformed.away_history[6:] == 0.0)
+        # Real rows should be normalized (non-zero)
+        assert np.any(transformed.home_history[:6] != 0.0)
+
+    def test_seq_length_after_normalization(self):
+        """_seq_length must return correct count after normalization."""
+        seq_len, feat_dim = 10, 23
+        seq = np.random.randn(seq_len, feat_dim).astype(np.float32)
+        seq[7:] = 0.0  # 7 real timesteps
+
+        sample = SequenceDataSample(
+            home_history=seq.copy(),
+            away_history=seq.copy(),
+            comparison=np.random.randn(COMP_DIM).astype(np.float32),
+            home_team_id=0, away_team_id=1,
+            home_win=True, home_score=25.0, away_score=20.0,
+        )
+
+        norm = SequenceNormalizer()
+        norm.fit([sample])
+        transformed = norm.transform_sample(sample)
+
+        assert _seq_length(transformed.home_history) == 7
+        assert _seq_length(transformed.away_history) == 7
+
+
+class TestSequenceDatasetAugmentation:
+    def _make_sample(self):
+        np.random.seed(42)
+        return SequenceDataSample(
+            home_history=np.random.randn(10, 23).astype(np.float32),
+            away_history=np.random.randn(10, 23).astype(np.float32),
+            comparison=np.random.randn(COMP_DIM).astype(np.float32),
+            home_team_id=0, away_team_id=1,
+            home_win=True, home_score=25.0, away_score=20.0,
+        )
+
+    def test_augmented_comparison_negates_differentials(self):
+        """Differential features in comparison should be negated on swap."""
+        sample = self._make_sample()
+        ds = SequenceDataset([sample], augment=True)
+
+        for _ in range(100):
+            item = ds[0]
+            if item['home_win'].item() == 0.0:  # Swapped
+                comp_orig = sample.comparison
+                comp_aug = item['comparison'].numpy()
+                for i in _COMP_NEGATE_INDICES:
+                    assert comp_aug[i] == pytest.approx(-comp_orig[i], abs=1e-5), \
+                        f"Index {i} should be negated"
+                break
+        else:
+            pytest.fail("Augmentation never triggered in 100 attempts")
+
+    def test_augmented_comparison_preserves_symmetric(self):
+        """Symmetric features (is_local, temporal) should be unchanged on swap."""
+        sample = self._make_sample()
+        ds = SequenceDataset([sample], augment=True)
+        symmetric = {4, 15, 16, 17, 18, 19, 20, 21, 29, 30}
+
+        for _ in range(100):
+            item = ds[0]
+            if item['home_win'].item() == 0.0:  # Swapped
+                comp_orig = sample.comparison
+                comp_aug = item['comparison'].numpy()
+                for i in symmetric:
+                    assert comp_aug[i] == pytest.approx(comp_orig[i], abs=1e-5), \
+                        f"Index {i} should be preserved (symmetric)"
+                break
+        else:
+            pytest.fail("Augmentation never triggered in 100 attempts")
+
+    def test_augmented_comparison_swaps_home_away(self):
+        """Home/away pairs in comparison should be swapped."""
+        sample = self._make_sample()
+        ds = SequenceDataset([sample], augment=True)
+
+        for _ in range(100):
+            item = ds[0]
+            if item['home_win'].item() == 0.0:  # Swapped
+                comp_orig = sample.comparison
+                comp_aug = item['comparison'].numpy()
+                for h, a in _COMP_SWAP_PAIRS:
+                    assert comp_aug[h] == pytest.approx(comp_orig[a], abs=1e-5), \
+                        f"Swap pair ({h},{a}): aug[{h}] should equal orig[{a}]"
+                    assert comp_aug[a] == pytest.approx(comp_orig[h], abs=1e-5), \
+                        f"Swap pair ({h},{a}): aug[{a}] should equal orig[{h}]"
+                break
+        else:
+            pytest.fail("Augmentation never triggered in 100 attempts")
+
+    def test_comp_augmentation_indices_cover_all(self):
+        """All 50 comparison indices should be accounted for."""
+        all_indices = set(range(COMP_DIM))
+        negate = set(_COMP_NEGATE_INDICES)
+        flip = set(_COMP_FLIP_INDICES)
+        swap = set()
+        for h, a in _COMP_SWAP_PAIRS:
+            swap.add(h)
+            swap.add(a)
+        covered = negate | flip | swap
+        uncovered = all_indices - covered
+        # Symmetric features that don't need transformation
+        expected_symmetric = {4, 15, 16, 17, 18, 19, 20, 21, 29, 30}
+        assert uncovered == expected_symmetric, \
+            f"Unexpected uncovered indices: {uncovered - expected_symmetric}"

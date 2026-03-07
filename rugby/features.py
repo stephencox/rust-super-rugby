@@ -606,10 +606,13 @@ class SequenceNormalizer:
         self.comp_std[self.comp_std < 0.001] = 1.0
 
     def transform_sequence(self, seq: np.ndarray) -> np.ndarray:
-        """Normalize a sequence [seq_len, features]."""
+        """Normalize a sequence [seq_len, features], preserving zero-padding."""
         if self.seq_mean is None:
             raise ValueError("Normalizer not fitted")
-        return (seq - self.seq_mean) / self.seq_std
+        mask = np.any(seq != 0, axis=1)  # True for real timesteps
+        result = np.zeros_like(seq)
+        result[mask] = (seq[mask] - self.seq_mean) / self.seq_std
+        return result
 
     def transform_comparison(self, comp: np.ndarray) -> np.ndarray:
         """Normalize comparison features [features]."""

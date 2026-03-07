@@ -34,6 +34,22 @@ _SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
                (32, 33)]
 _RESET_INDICES = {31: 0.0}  # Reset to neutral on swap
 
+# Comparison feature indices for LSTM augmentation (50-dim comparison vector)
+# See SequenceFeatureBuilder._build_comparison_features for layout.
+_COMP_NEGATE_INDICES = [0, 1, 2, 24, 35, 42, 43, 44, 49]
+_COMP_FLIP_INDICES = [3]  # log5 → 1-log5
+_COMP_SWAP_PAIRS = [
+    (5, 10), (6, 11), (7, 12), (8, 13), (9, 14),  # home/away stats
+    (22, 23),                                        # home/away rest_norm
+    (25, 26),                                        # home/away short_turnaround
+    (27, 28),                                        # home/away streak_norm
+    (31, 32),                                        # home/away match_density
+    (33, 34),                                        # home/away elo
+    (36, 39), (37, 40), (38, 41),                   # home/away workload
+    (45, 47), (46, 48),                              # home/away venue
+]
+# Keep (symmetric): 4 (is_local), 15-21 (temporal), 29-30 (h2h)
+
 
 def quantile_loss(pred: torch.Tensor, target: torch.Tensor,
                   quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9)) -> torch.Tensor:
@@ -560,10 +576,17 @@ class SequenceDataset(Dataset):
 
         if self.augment and random.random() < 0.5:
             # Swap home/away and flip the label
+            comp = s.comparison.copy()
+            for i in _COMP_NEGATE_INDICES:
+                comp[i] = -comp[i]
+            for i in _COMP_FLIP_INDICES:
+                comp[i] = 1.0 - comp[i]
+            for h, a in _COMP_SWAP_PAIRS:
+                comp[h], comp[a] = comp[a], comp[h]
             return {
                 'home_history': torch.tensor(s.away_history, dtype=torch.float32),
                 'away_history': torch.tensor(s.home_history, dtype=torch.float32),
-                'comparison': torch.tensor(-s.comparison, dtype=torch.float32),
+                'comparison': torch.tensor(comp, dtype=torch.float32),
                 'home_win': torch.tensor(1.0 - home_win, dtype=torch.float32),
                 'margin': torch.tensor(-margin, dtype=torch.float32),
                 'home_length': torch.tensor(_seq_length(s.away_history), dtype=torch.long),
