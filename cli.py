@@ -108,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--lr", type=float, default=None, help="Learning rate")
     train_p.add_argument("--production", action="store_true",
                          help="Train on all data (no validation split)")
+    train_p.add_argument("--ensemble", type=int, default=1, metavar="N",
+                         help="Train N models and average predictions (default: 1)")
     train_p.add_argument("--tensorboard", type=str, default=None, metavar="DIR",
                          help="Log training curves to TensorBoard (e.g. runs/mlp)")
 
@@ -423,47 +425,64 @@ def cmd_train(args, config: Config):
     )
 
     log_dir = args.tensorboard
+    n_ensemble = args.ensemble
 
-    print(f"\n[4/5] Training win classifier for {epochs} epochs, lr={lr}...")
-    win_model, win_history = train_win_model(
-        X_train_norm, y_win_train,
-        X_val_norm, y_win_val,
-        label_smoothing=0.05,
-        log_dir=log_dir,
-        **train_kwargs,
-    )
-    print(f"\n  Best validation accuracy: {win_history['best_val_acc']:.1%}")
-
-    if X_val_norm is not None:
-        win_eval = evaluate_win_model(win_model, X_val_norm, y_win_val)
-        print(f"  Win Accuracy: {win_eval['accuracy']:.1%}")
-
-    print(f"\n[5/5] Training margin regressor for {epochs} epochs, lr={lr}...")
-    margin_model, margin_history = train_margin_model(
-        X_train_norm, y_margin_train,
-        X_val_norm, y_margin_val,
-        log_dir=log_dir,
-        **train_kwargs,
-    )
-    margin_mean = margin_history.get('margin_offset', 0.0)
-    margin_std = margin_history.get('margin_scale', 1.0)
-
-    if X_val_norm is not None:
-        print(f"\n  Best validation MAE: {margin_history['best_val_mae']:.1f} points")
-
-    # Platt scaling calibration on validation set
+    ensemble_win_states = []
+    ensemble_margin_states = []
+    margin_mean = 0.0
+    margin_std = 1.0
     platt_a, platt_b = 1.0, 0.0
-    if X_val_norm is not None:
-        platt_a, platt_b = fit_platt_scaling(win_model, X_val_norm, y_win_val)
-        print(f"\n  Platt scaling: a={platt_a:.3f}, b={platt_b:.3f}")
+
+    for run in range(n_ensemble):
+        run_label = f" (run {run + 1}/{n_ensemble})" if n_ensemble > 1 else ""
+
+        print(f"\n[4/5] Training win classifier{run_label} for {epochs} epochs, lr={lr}...")
+        win_model, win_history = train_win_model(
+            X_train_norm, y_win_train,
+            X_val_norm, y_win_val,
+            label_smoothing=0.05,
+            log_dir=log_dir,
+            **train_kwargs,
+        )
+        print(f"\n  Best validation accuracy: {win_history['best_val_acc']:.1%}")
+
+        if X_val_norm is not None:
+            win_eval = evaluate_win_model(win_model, X_val_norm, y_win_val)
+            print(f"  Win Accuracy: {win_eval['accuracy']:.1%}")
+
+        print(f"\n[5/5] Training margin regressor{run_label} for {epochs} epochs, lr={lr}...")
+        margin_model, margin_history = train_margin_model(
+            X_train_norm, y_margin_train,
+            X_val_norm, y_margin_val,
+            log_dir=log_dir,
+            **train_kwargs,
+        )
+        margin_mean = margin_history.get('margin_offset', 0.0)
+        margin_std = margin_history.get('margin_scale', 1.0)
+
+        if X_val_norm is not None:
+            print(f"\n  Best validation MAE: {margin_history['best_val_mae']:.1f} points")
+
+        # Platt scaling calibration on validation set
+        if X_val_norm is not None:
+            platt_a, platt_b = fit_platt_scaling(win_model, X_val_norm, y_win_val)
+            print(f"\n  Platt scaling: a={platt_a:.3f}, b={platt_b:.3f}")
+
+        ensemble_win_states.append({k: v.clone() for k, v in win_model.state_dict().items()})
+        ensemble_margin_states.append({k: v.clone() for k, v in margin_model.state_dict().items()})
 
     prefix = model_prefix(config)
     prefix.parent.mkdir(parents=True, exist_ok=True)
 
     # Unified checkpoint: models + normalizer + metadata in one file
     checkpoint = {
-        'win_model_state': win_model.state_dict(),
-        'margin_model_state': margin_model.state_dict(),
+        # Backward compat: first ensemble member as default
+        'win_model_state': ensemble_win_states[0],
+        'margin_model_state': ensemble_margin_states[0],
+        # Ensemble states
+        'ensemble_win_states': ensemble_win_states,
+        'ensemble_margin_states': ensemble_margin_states,
+        'n_ensemble': n_ensemble,
         'normalizer_mean': normalizer.mean,
         'normalizer_std': normalizer.std,
         'margin_mean': margin_mean,
@@ -480,7 +499,7 @@ def cmd_train(args, config: Config):
     }
     mlp_path = f"{prefix}_mlp.pt"
     torch.save(checkpoint, mlp_path)
-    print(f"\nModel saved to {mlp_path}")
+    print(f"\nModel saved to {mlp_path} ({n_ensemble} ensemble member{'s' if n_ensemble > 1 else ''})")
 
 
 def cmd_train_lstm(args, config: Config):
@@ -710,7 +729,8 @@ def cmd_tune_lstm(args, config: Config):
 def load_mlp_checkpoint(prefix: Path, config: Config):
     """Load MLP models, normalizer, and metadata from unified checkpoint.
 
-    Returns (win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b).
+    Returns (win_models, margin_models, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b).
+    win_models and margin_models are lists (ensemble members).
     """
     mlp_path = Path(f"{prefix}_mlp.pt")
     ckpt = torch.load(mlp_path, weights_only=False)
@@ -732,17 +752,28 @@ def load_mlp_checkpoint(prefix: Path, config: Config):
     for i, tid in enumerate(ckpt.get('team_to_idx_keys', [])):
         team_to_idx[int(tid)] = i + 1
 
-    win_model = WinClassifier(input_dim, hidden_dims=hidden_dims, dropout=dropout,
-                               use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-    win_model.load_state_dict(ckpt['win_model_state'])
-    win_model.train(False)
+    def _make_models(win_state, margin_state):
+        wm = WinClassifier(input_dim, hidden_dims=hidden_dims, dropout=dropout,
+                           use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
+        wm.load_state_dict(win_state)
+        wm.train(False)
+        mm = MarginRegressor(input_dim, hidden_dims=hidden_dims, dropout=dropout,
+                             use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
+        mm.load_state_dict(margin_state)
+        mm.train(False)
+        return wm, mm
 
-    margin_model = MarginRegressor(input_dim, hidden_dims=hidden_dims, dropout=dropout,
-                                    use_batchnorm=True, num_teams=num_teams, team_embed_dim=team_embed_dim)
-    margin_model.load_state_dict(ckpt['margin_model_state'])
-    margin_model.train(False)
+    # Load ensemble or single model
+    win_states = ckpt.get('ensemble_win_states', [ckpt['win_model_state']])
+    margin_states = ckpt.get('ensemble_margin_states', [ckpt['margin_model_state']])
 
-    return win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b
+    win_models, margin_models = [], []
+    for ws, ms in zip(win_states, margin_states):
+        wm, mm = _make_models(ws, ms)
+        win_models.append(wm)
+        margin_models.append(mm)
+
+    return win_models, margin_models, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b
 
 
 def load_lstm_checkpoint(prefix: Path, config: Config):
@@ -827,7 +858,7 @@ def cmd_predict(args, config: Config):
         win_prob = preds["win_prob"].item()
         margin = preds["margin"].item()
     else:
-        win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
+        win_models, margin_models, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
             load_mlp_checkpoint(prefix, config)
 
         builder = FeatureBuilder(matches, teams)
@@ -855,13 +886,22 @@ def cmd_predict(args, config: Config):
         home_id_t = torch.tensor([team_to_idx.get(home_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
         away_id_t = torch.tensor([team_to_idx.get(away_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
 
+        # Average predictions across ensemble members
+        all_wp, all_mq10, all_m, all_mq90 = [], [], [], []
         with torch.no_grad():
-            logits = win_model(X_t, home_id_t, away_id_t)
-            win_prob = torch.sigmoid(platt_a * logits + platt_b).item()
-            margin_quantiles = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_std + margin_mean
-            margin_q10 = margin_quantiles[0].item()
-            margin = margin_quantiles[1].item()  # median
-            margin_q90 = margin_quantiles[2].item()
+            for wm, mm in zip(win_models, margin_models):
+                logits = wm(X_t, home_id_t, away_id_t)
+                wp = torch.sigmoid(platt_a * logits + platt_b).item()
+                mq = mm.predict(X_t, home_id_t, away_id_t)[0] * margin_std + margin_mean
+                all_wp.append(wp)
+                all_mq10.append(mq[0].item())
+                all_m.append(mq[1].item())
+                all_mq90.append(mq[2].item())
+
+        win_prob = float(np.mean(all_wp))
+        margin_q10 = float(np.mean(all_mq10))
+        margin = float(np.mean(all_m))
+        margin_q90 = float(np.mean(all_mq90))
 
     winner = home_team.name if win_prob >= 0.5 else away_team.name
     prob = win_prob if win_prob >= 0.5 else 1 - win_prob
@@ -954,8 +994,11 @@ def cmd_predict_next(args, config: Config):
     else:
         if not output_json and not output_csv:
             print("Loading MLP models...")
-        win_model, margin_model, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
+        win_models, margin_models, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
             load_mlp_checkpoint(prefix, config)
+        n_ens = len(win_models)
+        if n_ens > 1 and not output_json and not output_csv:
+            print(f"  Ensemble: {n_ens} models")
 
         builder = FeatureBuilder(matches, teams)
         for match in sorted(matches, key=lambda m: m.date):
@@ -978,14 +1021,17 @@ def cmd_predict_next(args, config: Config):
             X_t = torch.tensor(X_norm, dtype=torch.float32)
             home_id_t = torch.tensor([team_to_idx.get(home_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
             away_id_t = torch.tensor([team_to_idx.get(away_team.id, 0)], dtype=torch.long) if num_teams > 0 else None
+            all_wp, all_mg, all_q10, all_q90 = [], [], [], []
             with torch.no_grad():
-                logits = win_model(X_t, home_id_t, away_id_t)
-                wp = torch.sigmoid(platt_a * logits + platt_b).item()
-                mq = margin_model.predict(X_t, home_id_t, away_id_t)[0] * margin_std + margin_mean
-                mg = mq[1].item()  # median
-                mg_q10 = mq[0].item()
-                mg_q90 = mq[2].item()
-            return wp, mg, mg_q10, mg_q90
+                for wm, mm in zip(win_models, margin_models):
+                    logits = wm(X_t, home_id_t, away_id_t)
+                    wp = torch.sigmoid(platt_a * logits + platt_b).item()
+                    mq = mm.predict(X_t, home_id_t, away_id_t)[0] * margin_std + margin_mean
+                    all_wp.append(wp)
+                    all_mg.append(mq[1].item())
+                    all_q10.append(mq[0].item())
+                    all_q90.append(mq[2].item())
+            return float(np.mean(all_wp)), float(np.mean(all_mg)), float(np.mean(all_q10)), float(np.mean(all_q90))
 
     # Find DB teams and predict
     def find_db_team(name):
@@ -1084,13 +1130,15 @@ def cmd_model_validate(args, config: Config):
     mlp_path = Path(f"{prefix}_mlp.pt")
     if mlp_path.exists():
         try:
-            win_m, margin_m, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
+            win_models, margin_models, normalizer, margin_mean, margin_std, team_to_idx, num_teams, platt_a, platt_b = \
                 load_mlp_checkpoint(prefix, config)
             input_dim = len(normalizer.mean)
-            embed_info = f", {num_teams} teams, embed_dim={win_m.team_embed_dim}" if num_teams > 0 else ""
+            n_ens = len(win_models)
+            embed_info = f", {num_teams} teams, embed_dim={win_models[0].team_embed_dim}" if num_teams > 0 else ""
             platt_info = f", platt=({platt_a:.3f}, {platt_b:.3f})" if platt_a != 1.0 or platt_b != 0.0 else ""
-            print(f"  MLP win model: OK ({input_dim} features{embed_info}{platt_info})")
-            print(f"  MLP margin model: OK ({input_dim} features{embed_info}, quantile=[.1,.5,.9])")
+            ens_info = f", ensemble={n_ens}" if n_ens > 1 else ""
+            print(f"  MLP win model: OK ({input_dim} features{embed_info}{platt_info}{ens_info})")
+            print(f"  MLP margin model: OK ({input_dim} features{embed_info}, quantile=[.1,.5,.9]{ens_info})")
         except Exception as e:
             errors.append(f"MLP: {e}")
             print(f"  MLP models: FAILED ({e})")

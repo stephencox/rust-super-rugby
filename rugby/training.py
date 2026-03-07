@@ -214,6 +214,12 @@ def train_win_model(
             writer.add_scalar('accuracy/train', train_acc, epoch)
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
 
+        # Production mode: track best training loss when no val set
+        if X_val is None:
+            if train_loss < best_val_loss:
+                best_val_loss = train_loss
+                best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
+
         # Validation (uses unsmoothed targets)
         if X_val is not None:
             model.train(False)
@@ -376,6 +382,13 @@ def train_margin_model(
             writer.add_scalar('loss/train', train_loss, epoch)
             writer.add_scalar('mae/train', train_margin_mae, epoch)
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+
+        # Production mode: track best training loss when no val set
+        if X_val is None:
+            if train_loss < best_val_loss:
+                best_val_loss = train_loss
+                best_val_mae = train_margin_mae
+                best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
 
         # Validation
         if X_val is not None:
