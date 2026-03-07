@@ -168,6 +168,11 @@ class MatchFeatures:
 class FeatureBuilder:
     """Builds features from match history."""
 
+    # Home advantage in Elo points (added to home team's rating for expected score)
+    ELO_HOME_ADVANTAGE = 100.0
+    # Seasonal regression factor: pull 1/3 toward 1500 at start of each year
+    ELO_REGRESSION_FACTOR = 1 / 3
+
     def __init__(self, matches: List[Match], teams: Dict[int, Team],
                  max_history: int = 10, min_history: int = 3,
                  elo_k: float = 32.0):
@@ -179,26 +184,48 @@ class FeatureBuilder:
 
         # Initialize Elo ratings
         self.elo_ratings: Dict[int, float] = {tid: 1500.0 for tid in teams.keys()}
+        self._last_elo_year: Optional[int] = None
 
         # Team match history (most recent first)
         self.team_history: Dict[int, List[Match]] = {tid: [] for tid in teams.keys()}
 
-    def _update_elo(self, home_id: int, away_id: int, home_win: bool):
-        """Update Elo ratings after a match."""
+    def _maybe_regress_elo(self, match_date: datetime):
+        """Regress Elo ratings toward 1500 at the start of each new year."""
+        year = match_date.year
+        if self._last_elo_year is not None and year > self._last_elo_year:
+            factor = self.ELO_REGRESSION_FACTOR
+            for tid in self.elo_ratings:
+                self.elo_ratings[tid] = self.elo_ratings[tid] + factor * (1500.0 - self.elo_ratings[tid])
+        self._last_elo_year = year
+
+    def _update_elo(self, home_id: int, away_id: int, home_win: bool,
+                    home_score: int, away_score: int):
+        """Update Elo ratings after a match with margin-of-victory scaling."""
         home_elo = self.elo_ratings[home_id]
         away_elo = self.elo_ratings[away_id]
 
-        # Expected scores
-        exp_home = 1.0 / (1.0 + 10 ** ((away_elo - home_elo) / 400))
+        # Expected scores (with home advantage)
+        elo_diff = (home_elo + self.ELO_HOME_ADVANTAGE) - away_elo
+        exp_home = 1.0 / (1.0 + 10 ** (-elo_diff / 400))
         exp_away = 1.0 - exp_home
 
         # Actual scores
         actual_home = 1.0 if home_win else 0.0
         actual_away = 1.0 - actual_home
 
+        # Margin-of-victory multiplier (FiveThirtyEight-style)
+        # ln(margin + 1) scaled by winner's Elo advantage to avoid autocorrelation
+        margin = abs(home_score - away_score)
+        mov_mult = np.log(margin + 1)
+        winner_elo_diff = elo_diff if home_win else -elo_diff
+        # Dampen when strong team wins (expected result)
+        mov_mult *= 2.2 / (2.2 + 0.001 * max(0, winner_elo_diff))
+
+        k = self.elo_k * mov_mult
+
         # Update ratings
-        self.elo_ratings[home_id] = home_elo + self.elo_k * (actual_home - exp_home)
-        self.elo_ratings[away_id] = away_elo + self.elo_k * (actual_away - exp_away)
+        self.elo_ratings[home_id] = home_elo + k * (actual_home - exp_home)
+        self.elo_ratings[away_id] = away_elo + k * (actual_away - exp_away)
 
     def _compute_team_stats(self, team_id: int, before_date: datetime) -> Optional[TeamStats]:
         """Compute team statistics from recent matches before a given date."""
@@ -455,12 +482,16 @@ class FeatureBuilder:
 
     def process_match(self, match: Match):
         """Process a match: update history and Elo (call after using features for training)."""
+        # Seasonal regression before first match of a new year
+        self._maybe_regress_elo(match.date)
+
         # Add to team histories (at front, most recent first)
         self.team_history[match.home_team_id].insert(0, match)
         self.team_history[match.away_team_id].insert(0, match)
 
-        # Update Elo
-        self._update_elo(match.home_team_id, match.away_team_id, match.home_win)
+        # Update Elo (with margin-of-victory)
+        self._update_elo(match.home_team_id, match.away_team_id, match.home_win,
+                         match.home_score, match.away_score)
 
     def build_dataset(self, start_date: Optional[datetime] = None,
                       end_date: Optional[datetime] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -763,6 +794,7 @@ class SequenceFeatureBuilder:
 
         # Initialize Elo ratings
         self.elo_ratings: Dict[int, float] = {tid: 1500.0 for tid in teams.keys()}
+        self._last_elo_year: Optional[int] = None
 
         # Team match history with computed stats at time of match
         # Each entry: (match, rolling_stats_at_time)
@@ -770,19 +802,36 @@ class SequenceFeatureBuilder:
             tid: [] for tid in teams.keys()
         }
 
-    def _update_elo(self, home_id: int, away_id: int, home_win: bool):
-        """Update Elo ratings after a match."""
+    def _maybe_regress_elo(self, match_date: datetime):
+        """Regress Elo ratings toward 1500 at the start of each new year."""
+        year = match_date.year
+        if self._last_elo_year is not None and year > self._last_elo_year:
+            for tid in self.elo_ratings:
+                self.elo_ratings[tid] += (1 / 3) * (1500.0 - self.elo_ratings[tid])
+        self._last_elo_year = year
+
+    def _update_elo(self, home_id: int, away_id: int, home_win: bool,
+                    home_score: int, away_score: int):
+        """Update Elo ratings after a match with margin-of-victory scaling."""
         home_elo = self.elo_ratings[home_id]
         away_elo = self.elo_ratings[away_id]
 
-        exp_home = 1.0 / (1.0 + 10 ** ((away_elo - home_elo) / 400))
+        elo_diff = (home_elo + 100.0) - away_elo  # Home advantage
+        exp_home = 1.0 / (1.0 + 10 ** (-elo_diff / 400))
         exp_away = 1.0 - exp_home
 
         actual_home = 1.0 if home_win else 0.0
         actual_away = 1.0 - actual_home
 
-        self.elo_ratings[home_id] = home_elo + self.elo_k * (actual_home - exp_home)
-        self.elo_ratings[away_id] = away_elo + self.elo_k * (actual_away - exp_away)
+        # Margin-of-victory multiplier
+        margin = abs(home_score - away_score)
+        mov_mult = np.log(margin + 1)
+        winner_elo_diff = elo_diff if home_win else -elo_diff
+        mov_mult *= 2.2 / (2.2 + 0.001 * max(0, winner_elo_diff))
+
+        k = self.elo_k * mov_mult
+        self.elo_ratings[home_id] = home_elo + k * (actual_home - exp_home)
+        self.elo_ratings[away_id] = away_elo + k * (actual_away - exp_away)
 
     def _compute_rolling_stats(self, team_id: int, before_date: datetime) -> Dict:
         """Compute rolling statistics for a team up to a given date."""
@@ -1174,6 +1223,9 @@ class SequenceFeatureBuilder:
 
     def process_match(self, match: Match):
         """Process a match: update history and Elo."""
+        # Seasonal regression before first match of a new year
+        self._maybe_regress_elo(match.date)
+
         # Compute rolling stats at time of this match
         home_stats = self._compute_rolling_stats(match.home_team_id, match.date)
         away_stats = self._compute_rolling_stats(match.away_team_id, match.date)
@@ -1182,8 +1234,9 @@ class SequenceFeatureBuilder:
         self.team_history[match.home_team_id].insert(0, (match, home_stats))
         self.team_history[match.away_team_id].insert(0, (match, away_stats))
 
-        # Update Elo
-        self._update_elo(match.home_team_id, match.away_team_id, match.home_win)
+        # Update Elo (with margin-of-victory)
+        self._update_elo(match.home_team_id, match.away_team_id, match.home_win,
+                         match.home_score, match.away_score)
 
     def build_dataset(
         self,
