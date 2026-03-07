@@ -72,6 +72,26 @@ class TestMLPDataset:
         expected_symmetric = {4, 24}  # is_local, travel_hours
         assert uncovered == expected_symmetric, f"Unexpected uncovered indices: {uncovered - expected_symmetric}"
 
+    def test_swap_pairs_are_semantically_correct(self):
+        """Each swap pair must swap a home_* feature with its away_* counterpart."""
+        names = MatchFeatures.feature_names()
+        for h_idx, a_idx in _SWAP_PAIRS:
+            h_name = names[h_idx]
+            a_name = names[a_idx]
+            # One should contain 'home' and the other 'away'
+            if 'home' in h_name:
+                expected_away = h_name.replace('home', 'away')
+                assert a_name == expected_away, (
+                    f"Swap pair ({h_idx},{a_idx}): {h_name} <-> {a_name}, "
+                    f"expected {h_name} <-> {expected_away}"
+                )
+            elif 'away' in h_name:
+                expected_home = h_name.replace('away', 'home')
+                assert a_name == expected_home, (
+                    f"Swap pair ({h_idx},{a_idx}): {h_name} <-> {a_name}, "
+                    f"expected {h_name} <-> {expected_home}"
+                )
+
 
 class TestTrainWinModel:
     def test_basic_training(self):

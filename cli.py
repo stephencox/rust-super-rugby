@@ -875,7 +875,6 @@ def cmd_predict(args, config: Config):
 
         builder = FeatureBuilder(matches, teams)
         for match in sorted(matches, key=lambda m: m.date):
-            builder.build_features(match)
             builder.process_match(match)
 
         now = datetime.now()
@@ -1014,7 +1013,6 @@ def cmd_predict_next(args, config: Config):
 
         builder = FeatureBuilder(matches, teams)
         for match in sorted(matches, key=lambda m: m.date):
-            builder.build_features(match)
             builder.process_match(match)
 
         def predict_fn(home_team, away_team, venue=None):

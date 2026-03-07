@@ -17,7 +17,8 @@ from .features import SequenceDataSample
 # Index 4: is_local (symmetric, keep)
 # Indices 5-9: home stats, 10-14: away stats (swap)
 # Indices 15-16: home_elo/away_elo (swap), 17: elo_diff (negate)
-# Indices 18-19: home form, 20-21: away form (swap)
+# Indices 18: home_streak, 19: away_streak (swap)
+# Indices 20: home_last5_win_rate, 21: away_last5_win_rate (swap)
 # Index 22: h2h_win_rate (flip: 1-x), 23: h2h_margin_avg (negate)
 # Index 24: travel_hours (symmetric, keep)
 # Indices 25-26: home/away consistency (swap)
@@ -28,7 +29,7 @@ from .features import SequenceDataSample
 _NEGATE_INDICES = [0, 1, 2, 3, 17, 23]
 _FLIP_INDICES = [22]  # x -> 1 - x
 _SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
-               (15, 16), (18, 20), (19, 21),
+               (15, 16), (18, 19), (20, 21),
                (25, 26), (27, 28), (29, 30),
                (32, 33)]
 _RESET_INDICES = {31: 0.0}  # Reset to neutral on swap
