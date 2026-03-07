@@ -34,7 +34,7 @@ def _make_matches():
 
 class TestMatchFeatures:
     def test_num_features(self):
-        assert MatchFeatures.num_features() == 34
+        assert MatchFeatures.num_features() == 38
 
     def test_to_array_length(self):
         f = MatchFeatures()

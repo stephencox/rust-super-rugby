@@ -31,7 +31,8 @@ _FLIP_INDICES = [22]  # x -> 1 - x
 _SWAP_PAIRS = [(5, 10), (6, 11), (7, 12), (8, 13), (9, 14),
                (15, 16), (18, 19), (20, 21),
                (25, 26), (27, 28), (29, 30),
-               (32, 33)]
+               (32, 33),
+               (34, 36), (35, 37)]
 _RESET_INDICES = {31: 0.0}  # Reset to neutral on swap
 
 # Comparison feature indices for LSTM augmentation (50-dim comparison vector)

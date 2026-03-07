@@ -30,6 +30,10 @@ class TeamStats:
     # Strength of schedule (avg Elo of opponents)
     sos: float = 0.0
 
+    # Try averages (from matches with try data)
+    tries_for_avg: float = 0.0
+    tries_against_avg: float = 0.0
+
 
 @dataclass
 class MatchFeatures:
@@ -92,6 +96,12 @@ class MatchFeatures:
     home_country_win_rate: float = 0.5
     away_country_win_rate: float = 0.5
 
+    # Try averages (4)
+    home_tries_for_avg: float = 0.0
+    home_tries_against_avg: float = 0.0
+    away_tries_for_avg: float = 0.0
+    away_tries_against_avg: float = 0.0
+
     def to_array(self) -> np.ndarray:
         """Convert to numpy array."""
         return np.array([
@@ -140,6 +150,11 @@ class MatchFeatures:
             self.home_venue_margin_avg,
             self.home_country_win_rate,
             self.away_country_win_rate,
+            # Tries (4)
+            self.home_tries_for_avg,
+            self.home_tries_against_avg,
+            self.away_tries_for_avg,
+            self.away_tries_against_avg,
         ], dtype=np.float32)
 
     @staticmethod
@@ -158,11 +173,13 @@ class MatchFeatures:
             'home_sos', 'away_sos',
             'home_venue_margin_avg',
             'home_country_win_rate', 'away_country_win_rate',
+            'home_tries_for_avg', 'home_tries_against_avg',
+            'away_tries_for_avg', 'away_tries_against_avg',
         ]
 
     @staticmethod
     def num_features() -> int:
-        return 34
+        return 38
 
 
 class FeatureBuilder:
@@ -243,6 +260,9 @@ class FeatureBuilder:
         streak = 0
         streak_counting = True
         last_5_wins = 0
+        total_tries_for = 0
+        total_tries_against = 0
+        tries_matches = 0
 
         margins = []
         opponent_ids = []
@@ -251,9 +271,17 @@ class FeatureBuilder:
             if m.home_team_id == team_id:
                 pf, pa = m.home_score, m.away_score
                 opponent_ids.append(m.away_team_id)
+                if m.home_tries is not None and m.away_tries is not None:
+                    total_tries_for += m.home_tries
+                    total_tries_against += m.away_tries
+                    tries_matches += 1
             else:
                 pf, pa = m.away_score, m.home_score
                 opponent_ids.append(m.home_team_id)
+                if m.home_tries is not None and m.away_tries is not None:
+                    total_tries_for += m.away_tries
+                    total_tries_against += m.home_tries
+                    tries_matches += 1
 
             won = pf > pa
             total_pf += pf
@@ -302,6 +330,8 @@ class FeatureBuilder:
             elo=self.elo_ratings[team_id],
             consistency=consistency,
             sos=sos,
+            tries_for_avg=total_tries_for / tries_matches if tries_matches > 0 else 0.0,
+            tries_against_avg=total_tries_against / tries_matches if tries_matches > 0 else 0.0,
         )
 
     @staticmethod
@@ -478,6 +508,11 @@ class FeatureBuilder:
             home_venue_margin_avg=home_venue_margin,
             home_country_win_rate=home_country_wr,
             away_country_win_rate=away_country_wr,
+            # Tries
+            home_tries_for_avg=home_stats.tries_for_avg,
+            home_tries_against_avg=home_stats.tries_against_avg,
+            away_tries_for_avg=away_stats.tries_for_avg,
+            away_tries_against_avg=away_stats.tries_against_avg,
         )
 
     def process_match(self, match: Match):
@@ -980,12 +1015,20 @@ class SequenceFeatureBuilder:
                 # Short turnaround
                 short_turnaround = 1.0 if days_rest < 7 else 0.0
 
+                # Try data (use 0 when not available)
+                if m.home_team_id == team_id:
+                    tf = float(m.home_tries) if m.home_tries is not None else 0.0
+                    ta = float(m.away_tries) if m.away_tries is not None else 0.0
+                else:
+                    tf = float(m.away_tries) if m.away_tries is not None else 0.0
+                    ta = float(m.home_tries) if m.home_tries is not None else 0.0
+
                 features = SequenceMatchFeatures(
                     score_for=float(pf),          # Raw score
                     score_against=float(pa),      # Raw score
                     margin=float(margin),         # Raw margin
-                    tries_for=0.0,                # Not available
-                    tries_against=0.0,
+                    tries_for=tf,
+                    tries_against=ta,
                     is_home=is_home,              # Binary (already 0 or 1)
                     win_indicator=won,            # Already 0, 0.5, or 1
                     streak_count=streak_count,    # Normalized 0-1
