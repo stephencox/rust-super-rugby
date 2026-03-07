@@ -131,6 +131,6 @@ class TestTrainMarginModel:
 
     def test_margin_scale(self):
         X = np.random.randn(50, INPUT_DIM).astype(np.float32)
-        y = np.full(50, 15.0, dtype=np.float32)
+        y = np.random.randn(50).astype(np.float32) * 10 + 15
         _, history = train_margin_model(X, y, epochs=3, verbose=False)
-        assert history['margin_scale'] == pytest.approx(15.0)
+        assert history['margin_scale'] == pytest.approx(float(np.std(y)), rel=1e-3)

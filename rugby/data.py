@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 
 # Default database path
-DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "rugby.db"
+DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "rugby.db"
 
 
 @dataclass

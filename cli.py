@@ -367,6 +367,7 @@ def cmd_train(args, config: Config):
     X_train_list, y_win_train_list, y_margin_train_list = [], [], []
     home_id_train_list, away_id_train_list = [], []
     X_val_list, y_win_val_list, y_margin_val_list = [], [], []
+    home_id_val_list, away_id_val_list = [], []
 
     # Build team_id -> embedding index mapping (1-based, 0 reserved for unknown)
     team_to_idx = {tid: i + 1 for i, tid in enumerate(sorted(teams.keys()))}
@@ -388,6 +389,8 @@ def cmd_train(args, config: Config):
             X_val_list.append(features.to_array())
             y_win_val_list.append(1.0 if match.home_win else 0.0)
             y_margin_val_list.append(float(margin))
+            home_id_val_list.append(team_to_idx.get(match.home_team_id, 0))
+            away_id_val_list.append(team_to_idx.get(match.away_team_id, 0))
 
     X_train = np.array(X_train_list)
     y_win_train = np.array(y_win_train_list)
@@ -404,11 +407,15 @@ def cmd_train(args, config: Config):
     X_val_norm = None
     y_win_val = None
     y_margin_val = None
+    val_home_team_ids = None
+    val_away_team_ids = None
     if X_val_list:
         X_val = np.array(X_val_list)
         y_win_val = np.array(y_win_val_list)
         y_margin_val = np.array(y_margin_val_list)
         X_val_norm = normalizer.transform(X_val)
+        val_home_team_ids = np.array(home_id_val_list, dtype=np.int64)
+        val_away_team_ids = np.array(away_id_val_list, dtype=np.int64)
         print(f"  Validation set: {len(X_val)} samples")
 
     train_kwargs = dict(
@@ -422,6 +429,8 @@ def cmd_train(args, config: Config):
         home_team_ids=home_team_ids,
         away_team_ids=away_team_ids,
         num_teams=num_teams,
+        val_home_team_ids=val_home_team_ids,
+        val_away_team_ids=val_away_team_ids,
     )
 
     log_dir = args.tensorboard
@@ -447,7 +456,8 @@ def cmd_train(args, config: Config):
         print(f"\n  Best validation accuracy: {win_history['best_val_acc']:.1%}")
 
         if X_val_norm is not None:
-            win_eval = evaluate_win_model(win_model, X_val_norm, y_win_val)
+            win_eval = evaluate_win_model(win_model, X_val_norm, y_win_val,
+                                          val_home_team_ids, val_away_team_ids)
             print(f"  Win Accuracy: {win_eval['accuracy']:.1%}")
 
         print(f"\n[5/5] Training margin regressor{run_label} for {epochs} epochs, lr={lr}...")
@@ -465,7 +475,9 @@ def cmd_train(args, config: Config):
 
         # Platt scaling calibration on validation set
         if X_val_norm is not None:
-            platt_a, platt_b = fit_platt_scaling(win_model, X_val_norm, y_win_val)
+            platt_a, platt_b = fit_platt_scaling(win_model, X_val_norm, y_win_val,
+                                                 home_team_ids=val_home_team_ids,
+                                                 away_team_ids=val_away_team_ids)
             print(f"\n  Platt scaling: a={platt_a:.3f}, b={platt_b:.3f}")
 
         ensemble_win_states.append({k: v.clone() for k, v in win_model.state_dict().items()})
@@ -970,7 +982,7 @@ def cmd_predict_next(args, config: Config):
         for match in sorted(matches, key=lambda m: m.date):
             builder.process_match(match)
 
-        def predict_fn(home_team, away_team):
+        def predict_fn(home_team, away_team, venue=None):
             now = datetime.now()
             home_seq = builder._build_team_sequence(home_team.id, now)
             away_seq = builder._build_team_sequence(away_team.id, now)

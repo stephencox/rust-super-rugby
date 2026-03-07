@@ -131,6 +131,8 @@ def train_win_model(
     label_smoothing: float = 0.0,
     log_dir: Optional[str] = None,
     verbose: bool = True,
+    val_home_team_ids: Optional[np.ndarray] = None,
+    val_away_team_ids: Optional[np.ndarray] = None,
 ) -> Tuple[WinClassifier, Dict]:
     """
     Train win classification model.
@@ -146,6 +148,9 @@ def train_win_model(
     if X_val is not None:
         X_val_t = torch.tensor(X_val, dtype=torch.float32)
         y_val_t = torch.tensor(y_val, dtype=torch.float32)
+
+    val_home_t = torch.tensor(val_home_team_ids, dtype=torch.long) if val_home_team_ids is not None else None
+    val_away_t = torch.tensor(val_away_team_ids, dtype=torch.long) if val_away_team_ids is not None else None
 
     # Create data loader (drop_last avoids BatchNorm issues with batch_size=1)
     train_dataset = MLPDataset(X_train, y_train, home_team_ids, away_team_ids, augment=augment_swap)
@@ -224,7 +229,7 @@ def train_win_model(
         if X_val is not None:
             model.train(False)
             with torch.no_grad():
-                val_logits = model(X_val_t)
+                val_logits = model(X_val_t, val_home_t, val_away_t)
                 val_loss = criterion(val_logits, y_val_t).item()
                 val_preds = (torch.sigmoid(val_logits) >= 0.5).float()
                 val_acc = (val_preds == y_val_t).sum().item() / len(y_val_t)
@@ -289,6 +294,8 @@ def train_margin_model(
     team_embed_dim: int = 8,
     log_dir: Optional[str] = None,
     verbose: bool = True,
+    val_home_team_ids: Optional[np.ndarray] = None,
+    val_away_team_ids: Optional[np.ndarray] = None,
 ) -> Tuple[MarginRegressor, Dict]:
     """
     Train margin regression model with quantile loss.
@@ -316,6 +323,9 @@ def train_margin_model(
     if X_val is not None:
         X_val_t = torch.tensor(X_val, dtype=torch.float32)
         y_val_t = torch.tensor(y_margin_val_scaled, dtype=torch.float32)
+
+    val_home_t = torch.tensor(val_home_team_ids, dtype=torch.long) if val_home_team_ids is not None else None
+    val_away_t = torch.tensor(val_away_team_ids, dtype=torch.long) if val_away_team_ids is not None else None
 
     # Create data loader (drop_last avoids BatchNorm issues with batch_size=1)
     # Signed margin: negate when swapping home/away
@@ -394,7 +404,7 @@ def train_margin_model(
         if X_val is not None:
             model.train(False)
             with torch.no_grad():
-                val_margin_pred = model(X_val_t)
+                val_margin_pred = model(X_val_t, val_home_t, val_away_t)
                 val_loss = quantile_loss(val_margin_pred, y_val_t).item()
                 # MAE based on median (q50)
                 val_margin_mae = (val_margin_pred[:, 1] - y_val_t).abs().mean().item() * margin_std
@@ -450,6 +460,8 @@ def fit_platt_scaling(
     y_val: np.ndarray,
     lr: float = 0.01,
     max_iter: int = 1000,
+    home_team_ids: Optional[np.ndarray] = None,
+    away_team_ids: Optional[np.ndarray] = None,
 ) -> Tuple[float, float]:
     """Fit Platt scaling parameters on validation logits.
 
@@ -458,10 +470,12 @@ def fit_platt_scaling(
     """
     X_t = torch.tensor(X_val, dtype=torch.float32)
     y_t = torch.tensor(y_val, dtype=torch.float32)
+    home_t = torch.tensor(home_team_ids, dtype=torch.long) if home_team_ids is not None else None
+    away_t = torch.tensor(away_team_ids, dtype=torch.long) if away_team_ids is not None else None
 
     model.train(False)
     with torch.no_grad():
-        logits = model(X_t)
+        logits = model(X_t, home_t, away_t)
 
     # Fit a, b via gradient descent on BCE loss
     a = torch.tensor(1.0, requires_grad=True)
@@ -480,18 +494,22 @@ def fit_platt_scaling(
     return a.item(), b.item()
 
 
-def evaluate_win_model(model: WinClassifier, X: np.ndarray, y: np.ndarray) -> Dict:
+def evaluate_win_model(model: WinClassifier, X: np.ndarray, y: np.ndarray,
+                       home_team_ids: Optional[np.ndarray] = None,
+                       away_team_ids: Optional[np.ndarray] = None) -> Dict:
     """Evaluate win classification model."""
     X_t = torch.tensor(X, dtype=torch.float32)
     y_t = torch.tensor(y, dtype=torch.float32)
+    home_t = torch.tensor(home_team_ids, dtype=torch.long) if home_team_ids is not None else None
+    away_t = torch.tensor(away_team_ids, dtype=torch.long) if away_team_ids is not None else None
 
     model.train(False)
     with torch.no_grad():
-        probs = model.predict_proba(X_t)
+        probs = model.predict_proba(X_t, home_t, away_t)
         preds = (probs >= 0.5).float()
 
         accuracy = (preds == y_t).float().mean().item()
-        loss = nn.BCEWithLogitsLoss()(model(X_t), y_t).item()
+        loss = nn.BCEWithLogitsLoss()(model(X_t, home_t, away_t), y_t).item()
 
         tp = ((preds == 1) & (y_t == 1)).sum().item()
         tn = ((preds == 0) & (y_t == 0)).sum().item()
