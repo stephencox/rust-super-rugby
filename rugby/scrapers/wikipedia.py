@@ -23,7 +23,8 @@ def _count_tries_in_cell(td) -> int:
     """
     try_tag = None
     for b in td.find_all('b'):
-        if b.get_text().strip().rstrip(':').lower() == 'try':
+        label = b.get_text().strip().rstrip(':').lower()
+        if label in ('try', 'tries'):
             try_tag = b
             break
     if not try_tag:
@@ -455,7 +456,7 @@ class WikipediaScraper:
                 venue = loc.get_text().strip() if loc else None
 
                 # Extract try counts from detail cells
-                # In SportsEvent format: home details are before score, away after
+                # SportsEvent layout: date | home | score | away | home_detail | report | away_detail | venue
                 tds = event.find_all("td")
                 score_idx = None
                 for i, td in enumerate(tds):
@@ -465,15 +466,15 @@ class WikipediaScraper:
                 home_tries = None
                 away_tries = None
                 if score_idx is not None:
-                    # Home detail cell: first cell with Try: before score
+                    _DETAIL_RE = re.compile(r'\b(Try|Tries|Pen|Con|Drop|Cards)\b', re.IGNORECASE)
+                    detail_cells = []
                     for td in tds[score_idx + 1:]:
-                        t = _count_tries_in_cell(td)
-                        if 'Try' in td.get_text() or t > 0:
-                            if home_tries is None:
-                                home_tries = t
-                            elif away_tries is None:
-                                away_tries = t
-                                break
+                        if _DETAIL_RE.search(td.get_text()):
+                            detail_cells.append(td)
+                    if len(detail_cells) >= 1:
+                        home_tries = _count_tries_in_cell(detail_cells[0])
+                    if len(detail_cells) >= 2:
+                        away_tries = _count_tries_in_cell(detail_cells[1])
 
                 matches.append(RawMatch(
                     date=match_date,
@@ -528,16 +529,16 @@ class WikipediaScraper:
                     # Extract try counts from the next row (detail row)
                     home_tries = None
                     away_tries = None
+                    _DETAIL_RE = re.compile(r'\b(Try|Tries|Pen|Con|Drop|Cards)\b', re.IGNORECASE)
                     if row_idx + 1 < len(rows):
-                        detail_cells = rows[row_idx + 1].find_all("td")
-                        for dc in detail_cells:
-                            if 'Try' in dc.get_text():
-                                t = _count_tries_in_cell(dc)
-                                if home_tries is None:
-                                    home_tries = t
-                                elif away_tries is None:
-                                    away_tries = t
-                                    break
+                        detail_cells = [
+                            dc for dc in rows[row_idx + 1].find_all("td")
+                            if _DETAIL_RE.search(dc.get_text())
+                        ]
+                        if len(detail_cells) >= 1:
+                            home_tries = _count_tries_in_cell(detail_cells[0])
+                        if len(detail_cells) >= 2:
+                            away_tries = _count_tries_in_cell(detail_cells[1])
 
                     matches.append(RawMatch(
                         date=match_date,
