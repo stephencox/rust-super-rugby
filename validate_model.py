@@ -70,10 +70,14 @@ def prepare_data(config: Config, db_path: Path, predict_matches: list, teams: di
 
     # Build prediction features (continuing the feature builder state)
     pred_features = []
+    pred_home_ids = []
+    pred_away_ids = []
     for match in sorted(predict_matches, key=lambda m: m.date):
         features = builder.build_features(match)
         builder.process_match(match)
         pred_features.append(features)
+        pred_home_ids.append(team_to_idx.get(match.home_team_id, 0))
+        pred_away_ids.append(team_to_idx.get(match.away_team_id, 0))
 
     return {
         'X': np.array(X_list),
@@ -83,6 +87,8 @@ def prepare_data(config: Config, db_path: Path, predict_matches: list, teams: di
         'away_ids': np.array(away_ids, dtype=np.int64),
         'num_teams': num_teams,
         'pred_features': pred_features,
+        'pred_home_ids': pred_home_ids,
+        'pred_away_ids': pred_away_ids,
     }
 
 
@@ -130,14 +136,18 @@ def train_and_predict(config: Config, db_path: Path, predict_matches: list, team
         win_model.train(False)
         margin_model.train(False)
 
+        use_team_ids = data['num_teams'] > 0
+
         for i, features in enumerate(data['pred_features']):
             if features is None:
                 continue
             x = normalizer.transform(np.array([features.to_array()]))
             x_t = torch.tensor(x, dtype=torch.float32)
+            home_id_t = torch.tensor([data['pred_home_ids'][i]], dtype=torch.long) if use_team_ids else None
+            away_id_t = torch.tensor([data['pred_away_ids'][i]], dtype=torch.long) if use_team_ids else None
             with torch.no_grad():
-                wp = torch.sigmoid(win_model(x_t)).item()
-                mp = margin_model(x_t)
+                wp = torch.sigmoid(win_model(x_t, home_id_t, away_id_t)).item()
+                mp = margin_model(x_t, home_id_t, away_id_t)
                 mq50 = mp[0, 1].item() * margin_std + margin_mean
             all_win_probs[i].append(wp)
             all_margins[i].append(mq50)
